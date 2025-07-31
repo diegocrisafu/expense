@@ -88,6 +88,27 @@ form.expense‑form button:hover {
     color: var(--white);
 }
 
+/* Delete button styling in the table */
+.delete‑btn {
+    background-color: #e74c3c;
+    color: var(--white);
+    border: none;
+    padding: 0.3rem 0.6rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    transition: background-color 0.3s ease;
+}
+.delete‑btn:hover {
+    background-color: #c0392b;
+}
+
+/* Chart container styling */
+.chart‑container {
+    max-width: 500px;
+    margin: 2rem auto;
+}
+
 .total {
     font-weight: bold;
     font-size: 1.1rem;

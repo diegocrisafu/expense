@@ -9,6 +9,8 @@
     <script crossorigin src="https://unpkg.com/react@17/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@17/umd/react-dom.development.js"></script>
     <script crossorigin src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+    <!-- Chart.js for visualising expenses by category -->
+    <script crossorigin src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
 </head>
 <body>
     <div id="app"></div>
@@ -73,6 +75,61 @@
             // Unique categories for filter dropdown
             const categories = Array.from(new Set(expenses.map((exp) => exp.category)));
 
+            // Ref to chart canvas and instance
+            const chartRef = React.useRef(null);
+            const [chartInstance, setChartInstance] = useState(null);
+
+            // Update the pie chart whenever expenses change
+            useEffect(() => {
+                // Aggregate totals by category
+                const totalsByCategory = expenses.reduce((acc, exp) => {
+                    acc[exp.category] = (acc[exp.category] || 0) + exp.amount;
+                    return acc;
+                }, {});
+                const labels = Object.keys(totalsByCategory);
+                const data = Object.values(totalsByCategory);
+                if (chartInstance) {
+                    chartInstance.data.labels = labels;
+                    chartInstance.data.datasets[0].data = data;
+                    chartInstance.update();
+                } else if (chartRef.current) {
+                    const ctx = chartRef.current.getContext('2d');
+                    const newChart = new Chart(ctx, {
+                        type: 'pie',
+                        data: {
+                            labels: labels,
+                            datasets: [
+                                {
+                                    label: 'Expense Distribution',
+                                    data: data,
+                                    backgroundColor: [
+                                        '#2a4d69', '#4b86b4', '#adcbe3', '#63ace5', '#7bc6cc', '#f8f397'
+                                    ],
+                                },
+                            ],
+                        },
+                        options: {
+                            responsive: true,
+                            plugins: {
+                                legend: {
+                                    position: 'bottom',
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Expenses by Category',
+                                },
+                            },
+                        },
+                    });
+                    setChartInstance(newChart);
+                }
+            }, [expenses]);
+
+            // Delete an expense by id
+            const deleteExpense = (id) => {
+                setExpenses((prev) => prev.filter((exp) => exp.id !== id));
+            };
+
             return (
                 <div className="container">
                     <h1>Expense Tracker</h1>
@@ -130,6 +187,7 @@
                                 <th>Description</th>
                                 <th>Category</th>
                                 <th>Amount ($)</th>
+                                <th>Actions</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -141,12 +199,18 @@
                                         <td>{exp.description}</td>
                                         <td>{exp.category}</td>
                                         <td>{exp.amount.toFixed(2)}</td>
+                                        <td><button className="delete‑btn" onClick={() => deleteExpense(exp.id)}>Delete</button></td>
                                     </tr>
                                 ))}
                         </tbody>
                     </table>
 
                     <div className="total">Total: ${total.toFixed(2)}</div>
+
+                    {/* Pie chart visualisation */}
+                    <div className="chart‑container">
+                        <canvas ref={chartRef}></canvas>
+                    </div>
                 </div>
             );
         }
