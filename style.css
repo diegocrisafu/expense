@@ -1,0 +1,107 @@
+/* Basic styling for the Expense Tracker app */
+:root {
+    --primary: #2a4d69;
+    --secondary: #4b86b4;
+    --background: #f5f7fa;
+    --white: #ffffff;
+    --text: #333;
+    --light-text: #555;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    font-family: Arial, Helvetica, sans-serif;
+    background-color: var(--background);
+    color: var(--text);
+}
+
+.container {
+    max-width: 800px;
+    margin: 2rem auto;
+    background-color: var(--white);
+    padding: 2rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
+}
+
+h1 {
+    text-align: center;
+    color: var(--primary);
+    margin-top: 0;
+}
+
+form.expense‑form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+form.expense‑form input,
+form.expense‑form select {
+    flex: 1 1 150px;
+    padding: 0.5rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.9rem;
+}
+
+form.expense‑form button {
+    flex: 1 1 100px;
+    padding: 0.5rem;
+    background-color: var(--primary);
+    color: var(--white);
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+}
+
+form.expense‑form button:hover {
+    background-color: var(--secondary);
+}
+
+.filter {
+    margin: 1rem 0;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.expense‑table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1rem;
+}
+
+.expense‑table th,
+.expense‑table td {
+    padding: 0.5rem;
+    border-bottom: 1px solid #ddd;
+    text-align: left;
+    font-size: 0.9rem;
+}
+
+.expense‑table th {
+    background-color: var(--primary);
+    color: var(--white);
+}
+
+.total {
+    font-weight: bold;
+    font-size: 1.1rem;
+    text-align: right;
+    color: var(--primary);
+}
+
+@media (max-width: 600px) {
+    form.expense‑form {
+        flex-direction: column;
+    }
+    form.expense‑form input,
+    form.expense‑form select,
+    form.expense‑form button {
+        flex: 1 1 100%;
+    }
+}

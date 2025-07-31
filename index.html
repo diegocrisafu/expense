@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Expense Tracker</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- React and Babel CDN imports -->
+    <script crossorigin src="https://unpkg.com/react@17/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@17/umd/react-dom.development.js"></script>
+    <script crossorigin src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+</head>
+<body>
+    <div id="app"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        /**
+         * ExpenseTracker component
+         * Provides a form to add expenses and displays a list of all
+         * expenses stored in localStorage. The total is calculated from
+         * the current list. Users can optionally filter by category.
+         */
+        function ExpenseTracker() {
+            // Initialize state from localStorage if available
+            const [expenses, setExpenses] = useState(() => {
+                const saved = localStorage.getItem('expenses');
+                return saved ? JSON.parse(saved) : [];
+            });
+            const [filter, setFilter] = useState('');
+
+            // Save expenses to localStorage whenever they change
+            useEffect(() => {
+                localStorage.setItem('expenses', JSON.stringify(expenses));
+            }, [expenses]);
+
+            // Form fields state
+            const [form, setForm] = useState({
+                date: '',
+                description: '',
+                category: 'General',
+                amount: ''
+            });
+
+            // Handle form input changes
+            const handleChange = (e) => {
+                const { name, value } = e.target;
+                setForm((prev) => ({ ...prev, [name]: value }));
+            };
+
+            // Add a new expense entry
+            const addExpense = (e) => {
+                e.preventDefault();
+                // Basic validation
+                if (!form.date || !form.description || !form.amount) return;
+                const newExpense = {
+                    id: Date.now(),
+                    date: form.date,
+                    description: form.description,
+                    category: form.category,
+                    amount: parseFloat(form.amount)
+                };
+                setExpenses((prev) => [...prev, newExpense]);
+                setForm({ date: '', description: '', category: 'General', amount: '' });
+            };
+
+            // Calculate total amount (filtered or all)
+            const total = expenses
+                .filter((exp) => !filter || exp.category === filter)
+                .reduce((sum, exp) => sum + exp.amount, 0);
+
+            // Unique categories for filter dropdown
+            const categories = Array.from(new Set(expenses.map((exp) => exp.category)));
+
+            return (
+                <div className="container">
+                    <h1>Expense Tracker</h1>
+                    <form className="expense‑form" onSubmit={addExpense}>
+                        <input
+                            type="date"
+                            name="date"
+                            value={form.date}
+                            onChange={handleChange}
+                            required
+                        />
+                        <input
+                            type="text"
+                            name="description"
+                            placeholder="Description"
+                            value={form.description}
+                            onChange={handleChange}
+                            required
+                        />
+                        <select name="category" value={form.category} onChange={handleChange}>
+                            <option value="General">General</option>
+                            <option value="Food">Food</option>
+                            <option value="Transport">Transport</option>
+                            <option value="Entertainment">Entertainment</option>
+                            <option value="Utilities">Utilities</option>
+                            <option value="Health">Health</option>
+                        </select>
+                        <input
+                            type="number"
+                            name="amount"
+                            placeholder="Amount"
+                            value={form.amount}
+                            onChange={handleChange}
+                            step="0.01"
+                            min="0"
+                            required
+                        />
+                        <button type="submit">Add Expense</button>
+                    </form>
+
+                    <div className="filter">
+                        <label htmlFor="categoryFilter">Filter by category:&nbsp;</label>
+                        <select id="categoryFilter" value={filter} onChange={(e) => setFilter(e.target.value)}>
+                            <option value="">All</option>
+                            {categories.map((cat) => (
+                                <option key={cat} value={cat}>{cat}</option>
+                            ))}
+                        </select>
+                    </div>
+
+                    <table className="expense‑table">
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>Description</th>
+                                <th>Category</th>
+                                <th>Amount ($)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {expenses
+                                .filter((exp) => !filter || exp.category === filter)
+                                .map((exp) => (
+                                    <tr key={exp.id}>
+                                        <td>{exp.date}</td>
+                                        <td>{exp.description}</td>
+                                        <td>{exp.category}</td>
+                                        <td>{exp.amount.toFixed(2)}</td>
+                                    </tr>
+                                ))}
+                        </tbody>
+                    </table>
+
+                    <div className="total">Total: ${total.toFixed(2)}</div>
+                </div>
+            );
+        }
+
+        // Render the ExpenseTracker component
+        ReactDOM.render(<ExpenseTracker />, document.getElementById('app'));
+    </script>
+</body>
+</html>
