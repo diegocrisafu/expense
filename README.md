@@ -16,6 +16,14 @@ This project is a lightweight **React** application for tracking personal expens
 
 Open `index.html` in any modern browser to start using the app.  There is no build process since the page loads React and Babel from CDNs and compiles the JSX in the browser.
 
+Alternatively, once GitHub Pages is enabled for this repository you will be able to access the live app at:
+
+```
+https://diegocrisafu.github.io/expense/
+```
+
+Until Pages is enabled you may see a 404 page; follow the Deployment instructions below to publish the site.
+
 ## Customisation
 
 - **Styling:** Edit `style.css` to change colours, fonts or layout.
