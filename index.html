@@ -31,6 +31,26 @@
                 return saved ? JSON.parse(saved) : [];
             });
             const [filter, setFilter] = useState('');
+            // State for text search by description or date
+            const [searchTerm, setSearchTerm] = useState('');
+            // Dark mode toggle state (load from localStorage if available)
+            const [darkMode, setDarkMode] = useState(() => {
+                const saved = localStorage.getItem('darkMode');
+                return saved ? JSON.parse(saved) : false;
+            });
+            // Persist dark mode preference
+            useEffect(() => {
+                localStorage.setItem('darkMode', JSON.stringify(darkMode));
+            }, [darkMode]);
+
+            // Editing state: track which expense is being edited and its values
+            const [editingId, setEditingId] = useState(null);
+            const [editForm, setEditForm] = useState({
+                date: '',
+                description: '',
+                category: 'General',
+                amount: ''
+            });
 
             // Save expenses to localStorage whenever they change
             useEffect(() => {
@@ -130,9 +150,62 @@
                 setExpenses((prev) => prev.filter((exp) => exp.id !== id));
             };
 
+            // Start editing an expense
+            const startEdit = (exp) => {
+                setEditingId(exp.id);
+                setEditForm({
+                    date: exp.date,
+                    description: exp.description,
+                    category: exp.category,
+                    amount: exp.amount.toString(),
+                });
+            };
+
+            // Handle changes to the edit form
+            const handleEditChange = (e) => {
+                const { name, value } = e.target;
+                setEditForm((prev) => ({ ...prev, [name]: value }));
+            };
+
+            // Save the edited expense
+            const saveEdit = (id) => {
+                // Validate
+                if (!editForm.date || !editForm.description || editForm.amount === '') return;
+                setExpenses((prev) =>
+                    prev.map((exp) =>
+                        exp.id === id
+                            ? {
+                                  ...exp,
+                                  date: editForm.date,
+                                  description: editForm.description,
+                                  category: editForm.category,
+                                  amount: parseFloat(editForm.amount),
+                              }
+                            : exp
+                    )
+                );
+                setEditingId(null);
+            };
+
+            // Cancel editing
+            const cancelEdit = () => {
+                setEditingId(null);
+            };
+
             return (
-                <div className="container">
+                <div className={`container ${darkMode ? 'dark' : ''}`}>                    
                     <h1>Expense Tracker</h1>
+                    {/* Dark mode toggle */}
+                    <div className="dark‑toggle">
+                        <label>
+                            <input
+                                type="checkbox"
+                                checked={darkMode}
+                                onChange={(e) => setDarkMode(e.target.checked)}
+                            />
+                            &nbsp;Dark Mode
+                        </label>
+                    </div>
                     <form className="expense‑form" onSubmit={addExpense}>
                         <input
                             type="date"
@@ -170,6 +243,18 @@
                         <button type="submit">Add Expense</button>
                     </form>
 
+                    {/* Search filter */}
+                    <div className="search">
+                        <label htmlFor="searchInput">Search description/date:&nbsp;</label>
+                        <input
+                            id="searchInput"
+                            type="text"
+                            placeholder="Search..."
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                        />
+                    </div>
+
                     <div className="filter">
                         <label htmlFor="categoryFilter">Filter by category:&nbsp;</label>
                         <select id="categoryFilter" value={filter} onChange={(e) => setFilter(e.target.value)}>
@@ -192,15 +277,71 @@
                         </thead>
                         <tbody>
                             {expenses
-                                .filter((exp) => !filter || exp.category === filter)
+                                .filter((exp) => (!filter || exp.category === filter))
+                                .filter((exp) =>
+                                    exp.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                                    exp.date.includes(searchTerm)
+                                )
                                 .map((exp) => (
-                                    <tr key={exp.id}>
-                                        <td>{exp.date}</td>
-                                        <td>{exp.description}</td>
-                                        <td>{exp.category}</td>
-                                        <td>{exp.amount.toFixed(2)}</td>
-                                        <td><button className="delete‑btn" onClick={() => deleteExpense(exp.id)}>Delete</button></td>
-                                    </tr>
+                                    editingId === exp.id ? (
+                                        <tr key={exp.id} className="editing">
+                                            <td>
+                                                <input
+                                                    type="date"
+                                                    name="date"
+                                                    value={editForm.date}
+                                                    onChange={handleEditChange}
+                                                />
+                                            </td>
+                                            <td>
+                                                <input
+                                                    type="text"
+                                                    name="description"
+                                                    value={editForm.description}
+                                                    onChange={handleEditChange}
+                                                />
+                                            </td>
+                                            <td>
+                                                <select
+                                                    name="category"
+                                                    value={editForm.category}
+                                                    onChange={handleEditChange}
+                                                >
+                                                    <option value="General">General</option>
+                                                    <option value="Food">Food</option>
+                                                    <option value="Transport">Transport</option>
+                                                    <option value="Entertainment">Entertainment</option>
+                                                    <option value="Utilities">Utilities</option>
+                                                    <option value="Health">Health</option>
+                                                </select>
+                                            </td>
+                                            <td>
+                                                <input
+                                                    type="number"
+                                                    name="amount"
+                                                    value={editForm.amount}
+                                                    onChange={handleEditChange}
+                                                    step="0.01"
+                                                    min="0"
+                                                />
+                                            </td>
+                                            <td>
+                                                <button className="save‑btn" onClick={() => saveEdit(exp.id)}>Save</button>
+                                                <button className="cancel‑btn" onClick={cancelEdit}>Cancel</button>
+                                            </td>
+                                        </tr>
+                                    ) : (
+                                        <tr key={exp.id}>
+                                            <td>{exp.date}</td>
+                                            <td>{exp.description}</td>
+                                            <td>{exp.category}</td>
+                                            <td>{exp.amount.toFixed(2)}</td>
+                                            <td>
+                                                <button className="edit‑btn" onClick={() => startEdit(exp)}>Edit</button>
+                                                <button className="delete‑btn" onClick={() => deleteExpense(exp.id)}>Delete</button>
+                                            </td>
+                                        </tr>
+                                    )
                                 ))}
                         </tbody>
                     </table>
