@@ -1,0 +1,12 @@
+.env
+roger.log
+*.log
+*.log.*
+.roger.pid
+__pycache__/
+*.pyc
+.pytest_cache/
+*.db
+venv/
+.venv/
+polymarket_scanner/venv/
