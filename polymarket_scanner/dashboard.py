@@ -194,6 +194,18 @@ class DashboardData:
             ORDER BY th.timestamp DESC LIMIT ?
         """, (limit,))
 
+    # --- Daily equity for charts ---
+    def get_daily_equity(self) -> list[dict]:
+        """Daily aggregated P&L for equity curve charts."""
+        return self._safe_query("""
+            SELECT DATE(timestamp) as date,
+                   COALESCE(SUM(CAST(pnl AS FLOAT)), 0) as daily_pnl,
+                   COUNT(*) as trades
+            FROM trade_history
+            GROUP BY DATE(timestamp)
+            ORDER BY DATE(timestamp) ASC
+        """)
+
     # --- Full snapshot for web dashboard ---
     def get_full_snapshot(self) -> dict:
         """Everything the dashboard needs in one shot."""
@@ -342,6 +354,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps(snapshot, default=str).encode())
+
+        elif self.path == "/api/history":
+            data = DashboardData(self.db_path)
+            history = data.get_daily_equity()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(history, default=str).encode())
 
         else:
             self.send_response(404)
