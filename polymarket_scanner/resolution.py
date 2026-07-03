@@ -198,6 +198,29 @@ class ResolutionTracker:
             logger.error(f"Error checking resolution for {market_id}: {e}")
             return None
     
+    def _already_closed(self, trade_id: int) -> bool:
+        """True if this trade was already resolved/closed elsewhere.
+
+        Checks both the learning ledger (trade_history) and the managed-position
+        ledger, so a manager exit OR a prior resolution both count as closed.
+        """
+        try:
+            with get_connection(self.db_path) as conn:
+                cursor = conn.cursor()
+                r = cursor.execute(
+                    "SELECT status FROM trade_history WHERE id = ?", (trade_id,)
+                ).fetchone()
+                if r and r[0] and str(r[0]).upper() != "PENDING":
+                    return True
+                r = cursor.execute(
+                    "SELECT status FROM managed_positions WHERE trade_id = ?", (trade_id,)
+                ).fetchone()
+                if r and str(r[0]).upper() == "CLOSED":
+                    return True
+        except Exception as e:
+            logger.debug(f"_already_closed check failed for {trade_id}: {e}")
+        return False
+
     async def resolve_position(
         self,
         position: PendingPosition,
@@ -210,7 +233,20 @@ class ResolutionTracker:
         """
         if not resolution.get("resolved"):
             return None
-        
+
+        # GUARD: never double-resolve.  If the position manager already sold
+        # this position (managed exit) or it was already resolved, do NOT
+        # overwrite that real outcome with the market's eventual settlement.
+        # This was the root cause of trade_history showing 0 wins: cheap
+        # longshots we sold at a profit were re-booked as worthless-expiry
+        # losses when the market finally settled.
+        if self._already_closed(position.trade_id):
+            logger.debug(
+                f"Skipping resolution for trade {position.trade_id}: "
+                f"already closed by the position manager."
+            )
+            return None
+
         winning_outcome = resolution.get("winning_outcome")
         resolution_price = resolution.get("resolution_price", Decimal("0"))
         

@@ -74,6 +74,16 @@ SMART_EXIT_MIN_HEALTH_PROFIT = 0.40
 # Lightweight price checks happen every cycle; full analysis runs at this interval.
 SMART_EXIT_INTERVAL = 60
 
+# === DATA QUARANTINE ===
+# All trade history before this date was recorded by buggy accounting:
+#   • placeholder exit prices (0.5) → hallucinated take-profits
+#   • three uncoordinated ledgers double-counting the same position
+#   • trade_history booking sold-at-profit winners as worthless-expiry losses
+# It is NOT trustworthy and must be excluded from the performance scorecard and
+# go-live decisions.  The bot must re-accumulate CLEAN data (paper mode) after
+# the ledger fixes before any real-money allocation.  Set to the fix date.
+CLEAN_DATA_SINCE = "2026-07-03"
+
 # === DASHBOARD ===
 DASHBOARD_PORT = 8080
 
