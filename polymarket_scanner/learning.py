@@ -214,12 +214,17 @@ class LearningEngine:
             
             status = "WON" if won else "LOST"
             
-            # Update trade record
+            # Update trade record — only if still PENDING, so we never clobber a
+            # real managed exit that already settled this trade.
             cursor.execute("""
-                UPDATE trade_history 
+                UPDATE trade_history
                 SET status = ?, exit_price = ?, pnl = ?, resolved_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = ? AND status = 'PENDING'
             """, (status, str(exit_price), str(pnl), trade_id))
+            if cursor.rowcount == 0:
+                logger.debug(f"Trade {trade_id} already settled — skipping resolve_trade")
+                conn.commit()
+                return
             
             # Update strategy performance
             self._update_strategy_stats(cursor, strategy, won, pnl)

@@ -30,6 +30,13 @@ from .trading_config import (
     MAX_HOLD_HOURS,
     MIN_EXIT_SHARES,
     CLOB_HOST,
+    SMART_EXIT_ENABLED,
+)
+from .smart_exit import (
+    MarketSnapshot,
+    PositionContext,
+    SmartExitVerdict,
+    evaluate_position,
 )
 
 logger = logging.getLogger(__name__)
@@ -250,7 +257,7 @@ class PositionManager:
     # ------------------------------------------------------------------
     async def _fetch_live_price(self, token_id: str) -> Optional[tuple[Decimal, Decimal]]:
         """Fetch latest bid and mid-market price for a token from the CLOB.
-        
+
         Returns:
             (mid_price, bid_price) or None if unavailable.
             mid_price is used for exit checks, bid_price for actual sell orders.
@@ -284,11 +291,186 @@ class PositionManager:
             logger.debug(f"Price fetch failed for {token_id[:20]}: {e}")
             return None
 
+    async def _fetch_full_book(self, token_id: str) -> Optional[dict]:
+        """Fetch the full orderbook for smart exit analysis.
+
+        Returns dict with: bid, ask, mid, spread, book_depth_bid, book_depth_ask,
+        or None if unavailable.
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{CLOB_HOST}/book",
+                    params={"token_id": token_id},
+                    timeout=10.0,
+                )
+                if resp.status_code != 200:
+                    return None
+
+                book = resp.json()
+                bids = book.get("bids", [])
+                asks = book.get("asks", [])
+
+                best_bid = Decimal(str(bids[0]["price"])) if bids else None
+                best_ask = Decimal(str(asks[0]["price"])) if asks else None
+
+                if not best_bid or not best_ask:
+                    return None
+
+                mid = (best_bid + best_ask) / 2
+                spread = best_ask - best_bid
+
+                # Sum total depth on each side (USD value)
+                depth_bid = sum(
+                    Decimal(str(b.get("size", 0))) * Decimal(str(b.get("price", 0)))
+                    for b in bids
+                )
+                depth_ask = sum(
+                    Decimal(str(a.get("size", 0))) * Decimal(str(a.get("price", 0)))
+                    for a in asks
+                )
+
+                return {
+                    "bid": best_bid,
+                    "ask": best_ask,
+                    "mid": mid,
+                    "spread": spread,
+                    "book_depth_bid": depth_bid,
+                    "book_depth_ask": depth_ask,
+                }
+        except Exception as e:
+            logger.debug(f"Full book fetch failed for {token_id[:20]}: {e}")
+            return None
+
+    async def _fetch_market_data(self, market_id: str) -> Optional[dict]:
+        """Fetch market-level data (volume, momentum) from Gamma API for smart exits."""
+        try:
+            from .config import GAMMA_API_BASE
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{GAMMA_API_BASE}/markets/{market_id}",
+                    timeout=10.0,
+                )
+                if resp.status_code != 200:
+                    return None
+                return resp.json()
+        except Exception as e:
+            logger.debug(f"Market data fetch failed for {market_id[:20]}: {e}")
+            return None
+
+    def _get_entry_edge(self, trade_id: int) -> Decimal:
+        """Look up the edge at entry time.
+
+        Tries trade_history.edge first (if column exists), then estimates
+        from the take_profit_price vs entry_price ratio in managed_positions.
+        Falls back to 0.05 (5%) as a conservative default.
+        """
+        try:
+            with get_connection(self.db_path) as conn:
+                cursor = conn.cursor()
+                # Try the edge column (may not exist in older schemas)
+                try:
+                    cursor.execute(
+                        "SELECT edge FROM trade_history WHERE id = ?", (trade_id,)
+                    )
+                    row = cursor.fetchone()
+                    if row and row[0]:
+                        return Decimal(str(row[0]))
+                except Exception:
+                    pass
+                # Estimate from TP/entry ratio: if TP was +40%, edge was ~8-10%
+                cursor.execute(
+                    "SELECT entry_price, take_profit_price FROM managed_positions WHERE trade_id = ?",
+                    (trade_id,)
+                )
+                row = cursor.fetchone()
+                if row and row[0] and row[1]:
+                    entry = Decimal(str(row[0]))
+                    tp = Decimal(str(row[1]))
+                    if entry > 0:
+                        # Rough estimate: edge ≈ (TP - entry) / 4
+                        return max(Decimal("0.01"), (tp - entry) / 4)
+        except Exception:
+            pass
+        return Decimal("0.05")
+
+    def _get_strategy(self, trade_id: int) -> str:
+        """Look up the strategy from trade_history."""
+        try:
+            with get_connection(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT strategy FROM trade_history WHERE id = ?", (trade_id,)
+                )
+                row = cursor.fetchone()
+                if row and row[0]:
+                    return row[0].upper()
+        except Exception:
+            pass
+        return "UNKNOWN"
+
+    async def _build_smart_snapshot(
+        self, pos: 'ManagedPosition', book: dict, market_data: Optional[dict]
+    ) -> MarketSnapshot:
+        """Build a MarketSnapshot for the smart exit engine from raw data."""
+        bid = book["bid"]
+        ask = book["ask"]
+        mid = book["mid"]
+        spread = book["spread"]
+        spread_pct = spread / mid if mid > 0 else Decimal("1")
+
+        # Extract volume and momentum from Gamma market data
+        volume_24h = Decimal("0")
+        momentum_1h = Decimal("0")
+        if market_data:
+            try:
+                volume_24h = Decimal(str(market_data.get("volume24hr", 0) or 0))
+            except Exception:
+                pass
+            try:
+                momentum_1h = Decimal(str(market_data.get("oneHourPriceChange", 0) or 0))
+            except Exception:
+                pass
+
+        # Re-calculate current edge using the edge engine
+        from .edge import analyze_binary_market
+        edge_analysis = analyze_binary_market(
+            yes_ask=ask, yes_bid=bid,
+            momentum=momentum_1h, volume_24h=volume_24h,
+        )
+
+        # Determine current edge on OUR side
+        if pos.side == "BUY" or pos.side == "YES":
+            current_edge = edge_analysis.yes_edge
+        else:
+            current_edge = edge_analysis.no_edge
+
+        entry_edge = self._get_entry_edge(pos.trade_id)
+
+        return MarketSnapshot(
+            bid=bid,
+            ask=ask,
+            mid=mid,
+            spread=spread,
+            spread_pct=spread_pct,
+            volume_24h=volume_24h,
+            momentum_1h=momentum_1h,
+            book_depth_bid=book["book_depth_bid"],
+            book_depth_ask=book["book_depth_ask"],
+            current_edge=current_edge,
+            edge_at_entry=entry_edge,
+        )
+
     # ------------------------------------------------------------------
     # Core exit-check logic
     # ------------------------------------------------------------------
     async def check_exits(self) -> list[ExitSignal]:
         """Check all active positions for exit conditions.
+
+        Two-pass system:
+          Pass 1: Fixed exits (TP/SL/trailing/time) — fast, no extra API calls.
+          Pass 2: Smart exits — fetches full orderbook + market data, runs the
+                  intelligent reassessment engine for positions that Pass 1 didn't exit.
 
         Returns a list of ExitSignal objects for positions that should be closed.
         """
@@ -297,6 +479,7 @@ class PositionManager:
             return []
 
         exit_signals: list[ExitSignal] = []
+        positions_for_smart_eval: list[tuple[ManagedPosition, Decimal, Decimal]] = []
 
         for pos in positions:
             # Skip arb positions — they resolve on their own
@@ -307,8 +490,6 @@ class PositionManager:
             price_data = await self._fetch_live_price(pos.token_id)
 
             # --- DEAD MARKET DETECTION ---
-            # If we can't fetch price OR bid is near-zero for a long-held position,
-            # the market is likely resolved/delisted.  Force-close to free the slot.
             if price_data is None:
                 if pos.hold_hours > self.DEAD_MARKET_HOURS * 2:
                     logger.info(f"Force-closing dead position (no price data, held {pos.hold_hours:.0f}h): {pos.market_question[:40]}")
@@ -332,27 +513,23 @@ class PositionManager:
             pos.current_price = live_price
             if live_price > pos.high_water_mark:
                 pos.high_water_mark = live_price
-                # Update trailing stop when new high
                 pos.trailing_stop_price = live_price * (1 - TRAILING_STOP_PCT)
 
             # Persist updated prices
             self._update_position_prices(pos)
 
             # --- Safety: skip exit if bid is unreliable ---
-            # If spread is too wide, the bid is not a real price — skip this cycle.
             spread = live_price - bid_price if live_price > bid_price else Decimal("0")
             if spread > Decimal("0.08"):
                 logger.debug(f"Skipping exit check for {pos.market_question[:30]}: spread ${spread:.3f} too wide")
                 continue
 
-            # For low-bid markets that aren't yet "dead", allow time-exit
-            # but don't block all exit logic (removed the old 40% gate that
-            # trapped positions forever).
             bid_too_low = bid_price < pos.entry_price * Decimal("0.40")
 
-            # --- Check exit conditions ---
+            # ═══ PASS 1: Fixed exit conditions (fast, no extra API calls) ═══
+            fixed_exit = False
 
-            # 1) TAKE PROFIT — only if BID (actual sell price) is above entry
+            # 1) TAKE PROFIT
             if not bid_too_low and bid_price >= pos.take_profit_price and bid_price > pos.entry_price:
                 pnl = (bid_price - pos.entry_price) * pos.size
                 exit_signals.append(ExitSignal(
@@ -363,10 +540,10 @@ class PositionManager:
                     urgency=2,
                 ))
                 print(f"   TAKE PROFIT hit: {pos.market_question[:40]}... +${pnl:.2f}")
-                continue
+                fixed_exit = True
 
-            # 2) STOP LOSS — trigger even on low bids (cut losses)
-            if bid_price <= pos.stop_loss_price:
+            # 2) STOP LOSS
+            elif bid_price <= pos.stop_loss_price:
                 pnl = (bid_price - pos.entry_price) * pos.size
                 exit_signals.append(ExitSignal(
                     position_id=pos.position_id,
@@ -376,10 +553,10 @@ class PositionManager:
                     urgency=3,
                 ))
                 print(f"   STOP LOSS hit: {pos.market_question[:40]}... ${pnl:.2f}")
-                continue
+                fixed_exit = True
 
-            # 3) TRAILING STOP (only if we're in profit)
-            if not bid_too_low and live_price > pos.entry_price and live_price <= pos.trailing_stop_price:
+            # 3) TRAILING STOP
+            elif not bid_too_low and live_price > pos.entry_price and live_price <= pos.trailing_stop_price:
                 pnl = (bid_price - pos.entry_price) * pos.size
                 exit_signals.append(ExitSignal(
                     position_id=pos.position_id,
@@ -389,10 +566,10 @@ class PositionManager:
                     urgency=2,
                 ))
                 print(f"   TRAILING STOP: {pos.market_question[:40]}... +${pnl:.2f}")
-                continue
+                fixed_exit = True
 
-            # 4) TIME-BASED EXIT — always allowed, even with low bid
-            if pos.hold_hours > MAX_HOLD_HOURS:
+            # 4) TIME-BASED EXIT
+            elif pos.hold_hours > MAX_HOLD_HOURS:
                 pnl = (bid_price - pos.entry_price) * pos.size
                 exit_signals.append(ExitSignal(
                     position_id=pos.position_id,
@@ -405,11 +582,97 @@ class PositionManager:
                     f"   TIME EXIT ({pos.hold_hours:.0f}h): "
                     f"{pos.market_question[:40]}... ${pnl:.2f}"
                 )
-                continue
+                fixed_exit = True
+
+            # If no fixed exit triggered, queue for smart evaluation
+            if not fixed_exit:
+                positions_for_smart_eval.append((pos, live_price, bid_price))
+
+        # ═══ PASS 2: Smart exit evaluation (market-aware, calculated) ═══
+        if SMART_EXIT_ENABLED and positions_for_smart_eval:
+            smart_signals = await self._run_smart_exits(positions_for_smart_eval)
+            exit_signals.extend(smart_signals)
 
         # Sort by urgency (critical first)
         exit_signals.sort(key=lambda s: s.urgency, reverse=True)
         return exit_signals
+
+    async def _run_smart_exits(
+        self,
+        positions: list[tuple[ManagedPosition, Decimal, Decimal]],
+    ) -> list[ExitSignal]:
+        """Run the intelligent exit engine on positions that didn't trigger fixed exits.
+
+        For each position:
+        1. Fetch full orderbook (depth, spread)
+        2. Fetch market data (volume, momentum)
+        3. Re-calculate edge on our side
+        4. Evaluate composite health score
+        5. Make calculated exit/hold/tighten decision
+        """
+        smart_signals: list[ExitSignal] = []
+
+        for pos, live_price, bid_price in positions:
+            try:
+                # Fetch full market intelligence
+                book = await self._fetch_full_book(pos.token_id)
+                if not book:
+                    continue
+
+                market_data = await self._fetch_market_data(pos.market_id)
+                snapshot = await self._build_smart_snapshot(pos, book, market_data)
+
+                strategy = self._get_strategy(pos.trade_id)
+
+                pos_ctx = PositionContext(
+                    entry_price=pos.entry_price,
+                    current_price=pos.current_price,
+                    high_water_mark=pos.high_water_mark,
+                    size=pos.size,
+                    cost_basis=pos.cost_basis,
+                    hold_hours=pos.hold_hours,
+                    side=pos.side,
+                    strategy=strategy,
+                )
+
+                # Run the smart exit engine
+                verdict = evaluate_position(snapshot, pos_ctx)
+
+                if verdict.should_exit:
+                    pnl = (bid_price - pos.entry_price) * pos.size
+                    smart_signals.append(ExitSignal(
+                        position_id=pos.position_id,
+                        reason=verdict.reason,
+                        trigger_price=bid_price,
+                        expected_pnl=pnl,
+                        urgency=verdict.urgency,
+                    ))
+                    print(
+                        f"   SMART EXIT [{verdict.reason}]: "
+                        f"{pos.market_question[:40]}... "
+                        f"${pnl:+.2f} (health={verdict.health_score:.2f})"
+                    )
+                    logger.info(
+                        f"Smart exit for #{pos.position_id}: {verdict.explanation}"
+                    )
+
+                elif verdict.new_trailing_pct is not None:
+                    # Tighten trailing stop without exiting
+                    new_trail_price = pos.high_water_mark * (1 - verdict.new_trailing_pct)
+                    if new_trail_price > pos.trailing_stop_price:
+                        pos.trailing_stop_price = new_trail_price
+                        self._update_position_prices(pos)
+                        logger.info(
+                            f"Tightened trail for #{pos.position_id}: "
+                            f"→ ${new_trail_price:.4f} ({verdict.new_trailing_pct:.1%} trail) | "
+                            f"{verdict.explanation}"
+                        )
+
+            except Exception as e:
+                logger.debug(f"Smart exit eval failed for #{pos.position_id}: {e}")
+                continue
+
+        return smart_signals
 
     # ------------------------------------------------------------------
     # Execute exits (sell positions)
@@ -536,6 +799,17 @@ class PositionManager:
             conn.commit()
 
     def _close_position(self, position_id: int, reason: str, price: Decimal, pnl: Decimal):
+        """Close a managed position AND sync the learning ledger.
+
+        This is the single authority for a *managed* exit.  Previously it only
+        touched managed_positions, so real profitable exits never reached
+        trade_history — and resolution.py later booked the same position's
+        eventual worthless expiry as a total loss.  That double-count is why
+        trade_history showed 0 wins while the manager booked 21.  Now the
+        manager's realised exit is the truth of record in BOTH tables, and
+        resolution.py skips anything already closed here.
+        """
+        won = pnl > Decimal("0")
         with get_connection(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -547,6 +821,19 @@ class PositionManager:
                     closed_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             """, (reason, str(price), str(pnl), position_id))
+
+            # Sync the learning ledger (trade_history) with the REAL exit.
+            # pnl here is already computed on shares, so it is unit-correct.
+            row = cursor.execute(
+                "SELECT trade_id FROM managed_positions WHERE id = ?", (position_id,)
+            ).fetchone()
+            if row and row[0] is not None:
+                trade_id = row[0]
+                cursor.execute("""
+                    UPDATE trade_history
+                    SET status = ?, exit_price = ?, pnl = ?, resolved_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND status = 'PENDING'
+                """, ("WON" if won else "LOST", str(price), str(pnl), trade_id))
             conn.commit()
 
     # ------------------------------------------------------------------

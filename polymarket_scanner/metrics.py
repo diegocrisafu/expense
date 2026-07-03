@@ -27,7 +27,7 @@ from typing import Iterable, Optional
 
 from .costs import round_trip_cost
 from .database import get_connection, DB_PATH
-from .trading_config import STARTING_BALANCE
+from .trading_config import STARTING_BALANCE, CLEAN_DATA_SINCE
 
 logger = logging.getLogger(__name__)
 
@@ -125,18 +125,32 @@ def compute_metrics(
     return m
 
 
-def load_closed_trades(db_path: str = DB_PATH) -> list[ClosedTrade]:
-    """Read resolved trades (with a recorded P&L) ordered by resolution time."""
+def load_closed_trades(
+    db_path: str = DB_PATH,
+    since: str | None = CLEAN_DATA_SINCE,
+) -> list[ClosedTrade]:
+    """Read resolved trades (with a recorded P&L) ordered by resolution time.
+
+    Args:
+        since: ISO date; only trades recorded on/after this are counted.  Defaults
+            to CLEAN_DATA_SINCE to exclude the contaminated pre-fix history.
+            Pass ``since=None`` to inspect ALL history (including quarantined).
+    """
     rows: list[ClosedTrade] = []
+    where = "WHERE pnl IS NOT NULL"
+    params: tuple = ()
+    if since:
+        where += " AND COALESCE(resolved_at, timestamp) >= ?"
+        params = (since,)
     try:
         with get_connection(db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT strategy, entry_price, size, pnl
                 FROM trade_history
-                WHERE pnl IS NOT NULL
+                {where}
                 ORDER BY COALESCE(resolved_at, timestamp) ASC
-            """)
+            """, params)
             for r in cursor.fetchall():
                 strategy, entry_price, size, pnl = r
                 rows.append(ClosedTrade(
@@ -171,8 +185,10 @@ def format_report(db_path: str = DB_PATH) -> str:
     lines.append("═" * 72)
     lines.append("📊 PERFORMANCE SCORECARD (realised, cost-adjusted)")
     lines.append("═" * 72)
+    lines.append(f"  (clean data only — trades before {CLEAN_DATA_SINCE} are quarantined)")
     if overall.trades == 0:
-        lines.append("  No closed trades yet — scorecard populates as positions resolve.")
+        lines.append("  No CLEAN closed trades yet — scorecard populates as new positions resolve.")
+        lines.append("  Pre-fix history is untrustworthy; run paper mode to accumulate real data.")
         lines.append("═" * 72)
         return "\n".join(lines)
 
