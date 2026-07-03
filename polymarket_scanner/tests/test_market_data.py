@@ -45,3 +45,27 @@ def test_bridge_returns_none_without_enough_data(tmp_path):
     db = str(tmp_path / "md.db")
     capture("tokC", Decimal("0.20"), Decimal("0.22"), db_path=db)  # only 1 obs
     assert trade_from_capture("tokC", "MOMENTUM", Decimal("0.20"), Decimal("25"), db_path=db) is None
+
+
+def test_get_orderbook_captures_the_scanned_universe(monkeypatch):
+    """Every CLOB orderbook fetch must record a snapshot (not just held tokens)."""
+    import asyncio
+    from unittest.mock import AsyncMock
+    from polymarket_scanner.ingestion.clob import CLOBAPIClient
+    import polymarket_scanner.market_data as md
+
+    calls = []
+    monkeypatch.setattr(md, "capture", lambda *a, **k: calls.append((a, k)))
+
+    client = CLOBAPIClient()
+    client._get = AsyncMock(return_value={
+        "bids": [{"price": "0.30", "size": "100"}],
+        "asks": [{"price": "0.34", "size": "100"}],
+    })
+    book = asyncio.run(client.get_orderbook("tokZ"))
+    assert book is not None
+    assert len(calls) == 1                     # capture was invoked
+    args = calls[0][0]
+    assert args[0] == "tokZ"                    # token id
+    assert args[1] == Decimal("0.30")           # best bid
+    assert args[2] == Decimal("0.34")           # best ask
