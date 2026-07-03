@@ -279,6 +279,14 @@ class PositionManager:
                 best_bid = Decimal(str(bids[0]["price"])) if bids else None
                 best_ask = Decimal(str(asks[0]["price"])) if asks else None
 
+                # Persist a snapshot so we build a real, backtestable price
+                # series for every token we hold.  Best-effort; never blocks.
+                try:
+                    from .market_data import capture
+                    capture(token_id, best_bid, best_ask, db_path=self.db_path)
+                except Exception:
+                    pass
+
                 if best_bid and best_ask:
                     mid = (best_bid + best_ask) / 2
                     return (mid, best_bid)

@@ -118,6 +118,50 @@ def simulate_trade(trade: BacktestTrade, base_bet: Decimal = Decimal("1.00")) ->
                      gross_pnl, net_pnl, hold)
 
 
+def trade_from_capture(
+    token_id: str,
+    strategy: str,
+    entry_price: Decimal,
+    balance_at_entry: Decimal,
+    db_path: str = None,
+) -> BacktestTrade | None:
+    """Build a BacktestTrade from a captured real price series (market_data).
+
+    Returns None if we have fewer than 2 observations for the token — you can't
+    replay a path you never recorded.  This is the bridge from live-captured
+    data to the offline backtester.
+    """
+    from datetime import datetime
+    from .market_data import load_series
+    from .database import DB_PATH
+
+    series = load_series(token_id, db_path or DB_PATH)
+    if len(series) < 2:
+        return None
+
+    def _parse(ts):
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+            try:
+                return datetime.strptime(str(ts), fmt)
+            except (ValueError, TypeError):
+                continue
+        return None
+
+    t0 = _parse(series[0]["ts"])
+    steps: list[PriceStep] = []
+    for row in series:
+        bid = row["bid"] if row["bid"] is not None else row["mid"]
+        if bid is None:
+            continue
+        t = _parse(row["ts"])
+        hours = ((t - t0).total_seconds() / 3600.0) if (t and t0) else float(len(steps))
+        steps.append(PriceStep(bid=Decimal(str(bid)), hours_elapsed=hours))
+
+    if len(steps) < 2:
+        return None
+    return BacktestTrade(strategy, entry_price, balance_at_entry, steps)
+
+
 def run_backtest(trades: Sequence[BacktestTrade]) -> tuple[Metrics, list[SimResult]]:
     """Simulate a batch of trades and score them with the metrics harness."""
     results = [simulate_trade(t) for t in trades]
