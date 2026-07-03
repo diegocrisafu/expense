@@ -110,7 +110,16 @@ class CLOBAPIClient:
         """
         try:
             data = await self._get("/book", params={"token_id": token_id})
-            return parse_orderbook(token_id, data)
+            book = parse_orderbook(token_id, data)
+            # Capture a snapshot for EVERY token we look at (whole scanned
+            # universe, not just held positions) so a real entry-signal backtest
+            # becomes possible.  Best-effort; never affects the fetch.
+            try:
+                from ..market_data import capture
+                capture(token_id, book.best_bid, book.best_ask)
+            except Exception:
+                pass
+            return book
         except (httpx.HTTPError, httpx.TimeoutException) as e:
             logger.error(f"Error fetching orderbook for {token_id}: {e}")
             return None
