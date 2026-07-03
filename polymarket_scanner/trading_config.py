@@ -9,14 +9,22 @@ from decimal import Decimal
 STARTING_BALANCE = Decimal("25.00")  # Actual USDC cash as of Feb 22
 STOP_LOSS_THRESHOLD = Decimal("5.00")  # Stop if balance drops below this (protect 80% of capital)
 
+# === RISK RULE (SINGLE SOURCE OF TRUTH) ===
+# HARD non-negotiable: no single trade may cost more than this fraction of the
+# CURRENT balance.  Every sizing path funnels through risk_manager.check_trade,
+# which enforces this even against the Polymarket 5-share order minimum.
+MAX_TRADE_FRACTION = Decimal("0.05")   # 5% of balance, absolute ceiling per trade
+MIN_ORDER_SHARES = Decimal("5")        # Polymarket minimum shares per order
+
 # === TRADE SIZING ===
-# Polymarket requires minimum 5 shares per order.
-# At price 0.30, that's 5 × $0.30 = $1.50 per order minimum.
-# HARD_MAX_COST_PER_TRADE is the absolute dollar cap — if an order would
-# cost more than this, we REJECT it entirely (don't inflate the bet).
-ARB_BET_SIZE = Decimal("2.00")    # Bigger arb bets — arb is risk-free
-SIGNAL_BET_SIZE = Decimal("2.00") # Bigger signal bets — deploy more capital
-HARD_MAX_COST_PER_TRADE = Decimal("5.00")  # Raised from $2 — allow meaningful positions
+# Polymarket requires a minimum of 5 shares per order.  At price 0.30 that is
+# 5 × $0.30 = $1.50 minimum.  Because that floor can push an order ABOVE the 5%
+# cap on a small balance, the risk manager REJECTS such trades instead of
+# silently inflating them (the old behaviour blew past the cap).
+ARB_BET_SIZE = Decimal("1.00")    # Base arb bet (still capped at 5% by risk mgr)
+SIGNAL_BET_SIZE = Decimal("1.00") # Base signal bet (still capped at 5% by risk mgr)
+# Absolute dollar cap == 5% of starting balance; recomputed live from balance.
+HARD_MAX_COST_PER_TRADE = (STARTING_BALANCE * MAX_TRADE_FRACTION).quantize(Decimal("0.01"))
 
 # === SAFETY LIMITS ===
 MAX_TRADES_PER_HOUR = 12  # 3x more trades/hour — seize more opportunities
@@ -47,6 +55,24 @@ STOP_LOSS_PCT = Decimal("0.25")    # -25% stop (was 30% — cut losers faster)
 TRAILING_STOP_PCT = Decimal("0.12")  # 12% trailing from high (tighter — lock in gains)
 MAX_HOLD_HOURS = 48  # 2 days max (was 3 — recycle capital faster)
 MIN_EXIT_SHARES = Decimal("5.0")
+
+# === SMART EXIT ENGINE ===
+# Enable the intelligent position reassessment system.
+# When enabled, every cycle re-evaluates each position's health using
+# live market data (edge, momentum, volume, spread) and exits dynamically.
+SMART_EXIT_ENABLED = True
+
+# Minimum health score to hold a losing position (0–1).
+# Below this, the engine will cut losses even if the fixed SL hasn't triggered.
+SMART_EXIT_MIN_HEALTH_LOSS = 0.25
+
+# Minimum health score to hold a profitable position.
+# Below this, the engine takes profit even if TP hasn't triggered.
+SMART_EXIT_MIN_HEALTH_PROFIT = 0.40
+
+# How often to run full smart exit analysis (seconds).
+# Lightweight price checks happen every cycle; full analysis runs at this interval.
+SMART_EXIT_INTERVAL = 60
 
 # === DASHBOARD ===
 DASHBOARD_PORT = 8080

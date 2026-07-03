@@ -8,7 +8,9 @@ from polymarket_scanner.risk_manager import (
     RiskManager,
     StrategyBudget,
     STRATEGY_PROFILES,
+    order_cost,
 )
+from polymarket_scanner.trading_config import MAX_TRADE_FRACTION
 
 
 class TestStrategyBudget:
@@ -139,7 +141,7 @@ class TestRiskManager:
         mgr = self._make_manager()
         profile = mgr.get_strategy_profile("MOMENTUM")
         assert profile.name == "MOMENTUM"
-        assert profile.allocation_pct == Decimal("0.35")
+        assert profile.allocation_pct == Decimal("0.25")
 
     def test_get_strategy_profile_unknown(self):
         """Unknown strategies get conservative defaults."""
@@ -147,3 +149,82 @@ class TestRiskManager:
         profile = mgr.get_strategy_profile("NONEXISTENT")
         assert profile.max_per_trade_pct == Decimal("0.05")
         assert profile.max_open_positions == 1
+
+
+class TestOrderCost:
+    """Tests for the share-floor aware dollar→order converter."""
+
+    def test_no_inflation_when_shares_above_min(self):
+        """When budget buys >= 5 shares, cost stays <= budget."""
+        shares, cost = order_cost(Decimal("1.00"), Decimal("0.10"))
+        assert shares >= Decimal("5")
+        assert cost <= Decimal("1.00")
+
+    def test_five_share_floor_inflates_small_bets(self):
+        """A tiny budget is bumped to the 5-share minimum cost (honestly reported)."""
+        # $1.00 at $0.55 buys only 1.8 shares → forced to 5 shares = $2.75
+        shares, cost = order_cost(Decimal("1.00"), Decimal("0.55"))
+        assert shares == Decimal("5")
+        assert cost == Decimal("2.75")  # the REAL cost, not the $1.00 input
+
+    def test_zero_price_is_safe(self):
+        shares, cost = order_cost(Decimal("1.00"), Decimal("0"))
+        assert shares == Decimal("5")
+        assert cost > Decimal("0")
+
+
+class TestFivePercentInvariant:
+    """The hard rule: no accepted trade may cost > 5% of balance."""
+
+    @patch.object(RiskManager, "get_deployed_by_strategy", return_value=(Decimal("0"), 0))
+    @patch.object(RiskManager, "get_total_deployed", return_value=Decimal("0"))
+    def test_rejects_when_share_floor_would_breach_cap(self, m_total, m_dep):
+        """A high price where even 5 shares exceeds 5% is REJECTED, not inflated."""
+        mgr = self._make_manager()
+        # balance $25 → 5% cap = $1.25. At $0.50, 5 shares = $2.50 > cap → reject.
+        allowed, size, reason = mgr.check_trade(
+            "MOMENTUM", Decimal("1.00"), Decimal("25.00"), entry_price=Decimal("0.50")
+        )
+        assert allowed is False
+        assert "cap" in reason.lower()
+
+    @patch.object(RiskManager, "get_deployed_by_strategy", return_value=(Decimal("0"), 0))
+    @patch.object(RiskManager, "get_total_deployed", return_value=Decimal("0"))
+    def test_accepted_trade_never_exceeds_5pct_fuzz(self, m_total, m_dep):
+        """Fuzz: across balances and prices, accepted cost <= 5% of balance."""
+        import random
+        from polymarket_scanner.risk_manager import order_cost as _oc
+
+        mgr = self._make_manager()
+        random.seed(42)
+        for _ in range(2000):
+            balance = Decimal(str(round(random.uniform(6, 500), 2)))
+            price = Decimal(str(round(random.uniform(0.02, 0.55), 2)))
+            strat = random.choice(["ARB", "SWING", "MOMENTUM", "CORRELATED", "CONTRARIAN"])
+            allowed, size, _ = mgr.check_trade(
+                strat, Decimal("999"), balance, entry_price=price
+            )
+            if allowed:
+                _, actual_cost = _oc(size, price)
+                cap = balance * MAX_TRADE_FRACTION
+                assert actual_cost <= cap + Decimal("0.01"), (
+                    f"BREACH: {strat} cost ${actual_cost} > 5% (${cap}) "
+                    f"at balance ${balance}, price ${price}"
+                )
+
+    def _make_manager(self):
+        return RiskManager(db_path=":memory:")
+
+
+def test_allocations_sum_within_capital():
+    """Strategy allocations must not exceed 100% of capital (no phantom 110%)."""
+    total = sum(p.allocation_pct for p in STRATEGY_PROFILES.values())
+    assert total <= Decimal("1.00"), f"Allocations sum to {total}"
+
+
+def test_every_strategy_respects_5pct_per_trade():
+    """No strategy profile may allow > 5% per trade."""
+    assert all(
+        p.max_per_trade_pct <= MAX_TRADE_FRACTION
+        for p in STRATEGY_PROFILES.values()
+    )

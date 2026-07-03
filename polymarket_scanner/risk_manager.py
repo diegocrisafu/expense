@@ -29,13 +29,46 @@ KEY RULES:
 
 import logging
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Optional
 
 from .database import get_connection, DB_PATH
-from .trading_config import STOP_LOSS_THRESHOLD
+from .trading_config import (
+    STOP_LOSS_THRESHOLD,
+    MAX_TRADE_FRACTION,
+    MIN_ORDER_SHARES,
+)
 
 logger = logging.getLogger(__name__)
+
+_CENT = Decimal("0.01")
+_ZERO_PRICE = Decimal("0")
+
+
+def order_cost(dollars: Decimal, price: Decimal) -> tuple[Decimal, Decimal]:
+    """Convert a dollar budget into a real Polymarket order.
+
+    Polymarket enforces a 5-share minimum per order.  Naively doing
+    ``shares = max(dollars / price, 5)`` (the old code) SILENTLY inflates a
+    small bet: at price $0.55 a $1.00 budget becomes 5 shares = $2.75, blowing
+    straight past any dollar cap.  This helper is the single, honest converter:
+
+    - shares are floored (ROUND_DOWN) so cost never drifts UP from rounding,
+    - but never below the 5-share exchange minimum,
+    - the returned cost is what the order will ACTUALLY spend (rounded up a cent
+      to stay conservative).
+
+    Callers must treat ``cost`` — not the input ``dollars`` — as the amount
+    debited and risk-checked.  When ``cost > dollars`` it means the 5-share
+    floor forced a larger order; the risk manager rejects that upstream.
+    """
+    if price <= _ZERO_PRICE:
+        # Can't size without a price — return the exchange minimum defensively.
+        return MIN_ORDER_SHARES, (MIN_ORDER_SHARES * Decimal("0.01"))
+    raw_shares = (dollars / price).quantize(_CENT, rounding=ROUND_DOWN)
+    shares = max(raw_shares, MIN_ORDER_SHARES)
+    cost = (shares * price).quantize(_CENT, rounding=ROUND_UP)
+    return shares, cost
 
 
 # ─── Strategy budget configuration ───
@@ -66,65 +99,70 @@ class StrategyBudget:
 
 
 # ─── Pre-defined strategy profiles ───
-# STRATEGY ALLOCATION RATIONALE (based on historical P&L data):
-#   MOMENTUM:   +$25.82 net (86% WR) → Give it 40% of capital
-#   CORRELATED: +$18.80 net (100% WR) → Give it 40% of capital
-#   CONTRARIAN: untested but sound logic → Give it 15% of capital
-#   SWING:      -$4.17 net (big losses on expensive entries) → DISABLED (0%)
-#   ARB:        0 trades ever in thousands of cycles → DISABLED (0%)
+# ALLOCATION RATIONALE — de-overfit from prior "P&L" numbers.
+#   The old weights (MOMENTUM 40% "86% WR", CORRELATED 40% "100% WR") were fit
+#   to a HANDFUL of paper trades on a $25 account — 100% WR means ~2-3 wins, not
+#   an edge.  Allocations now start from a NEUTRAL prior and only tilt toward
+#   strategies with structural (not sample-noise) justification.  As the metrics
+#   harness accumulates a real sample, revisit these — don't hand-tune on <30
+#   trades per strategy.
 #
-# KEY INSIGHT: All big winners bought cheap (<$0.18) and rode up.
-# Stop buying expensive outcomes that have tiny upside and large downside.
+# INVARIANTS enforced here (asserted at import):
+#   • allocation_pct across strategies sums to <= 1.00 (no phantom 110% capital)
+#   • every max_per_trade_pct <= MAX_TRADE_FRACTION (5% hard ceiling)
+#
+# KEY STRUCTURAL INSIGHT retained: only buy cheap outcomes (<= MAX_ENTRY_PRICE);
+# asymmetric upside with bounded downside is the one edge we can defend.
 STRATEGY_PROFILES: dict[str, StrategyBudget] = {
-    # Arbitrage: Keep alive — risk-free when found.
+    # Arbitrage: risk-free when found → highest confidence, but rare.
     "ARB": StrategyBudget(
         name="ARB",
-        allocation_pct=Decimal("0.10"),
-        max_per_trade_pct=Decimal("0.08"),
+        allocation_pct=Decimal("0.15"),
+        max_per_trade_pct=Decimal("0.05"),
         max_open_positions=2,
         take_profit_pct=Decimal("0.05"),
         stop_loss_pct=Decimal("0.03"),
         trailing_stop_pct=Decimal("0.02"),
         max_hold_hours=24,
     ),
-    # SWING: Opened up — MAX_ENTRY_PRICE now prevents expensive entries.
+    # SWING: momentum-scalp on cheap entries.
     "SWING": StrategyBudget(
         name="SWING",
         allocation_pct=Decimal("0.20"),
-        max_per_trade_pct=Decimal("0.08"),
+        max_per_trade_pct=Decimal("0.05"),
         max_open_positions=4,
         take_profit_pct=Decimal("0.08"),
         stop_loss_pct=Decimal("0.05"),
         trailing_stop_pct=Decimal("0.04"),
         max_hold_hours=24,
     ),
-    # MOMENTUM: STAR PERFORMER — give it the most capital.
+    # MOMENTUM: trend continuation on cheap asymmetric bets.
     "MOMENTUM": StrategyBudget(
         name="MOMENTUM",
-        allocation_pct=Decimal("0.35"),
-        max_per_trade_pct=Decimal("0.10"),
-        max_open_positions=5,
+        allocation_pct=Decimal("0.25"),
+        max_per_trade_pct=Decimal("0.05"),
+        max_open_positions=3,
         take_profit_pct=Decimal("0.40"),
         stop_loss_pct=Decimal("0.25"),
         trailing_stop_pct=Decimal("0.12"),
         max_hold_hours=48,
     ),
-    # CORRELATED: 2nd BEST — structural mispricings are reliable.
+    # CORRELATED: structural mispricings between related markets — edge-driven.
     "CORRELATED": StrategyBudget(
         name="CORRELATED",
-        allocation_pct=Decimal("0.30"),
-        max_per_trade_pct=Decimal("0.10"),
-        max_open_positions=5,
+        allocation_pct=Decimal("0.25"),
+        max_per_trade_pct=Decimal("0.05"),
+        max_open_positions=3,
         take_profit_pct=Decimal("0.40"),
         stop_loss_pct=Decimal("0.25"),
         trailing_stop_pct=Decimal("0.12"),
         max_hold_hours=48,
     ),
-    # CONTRARIAN: Opened up — give it more room.
+    # CONTRARIAN: mean-reversion — smallest allocation, least proven.
     "CONTRARIAN": StrategyBudget(
         name="CONTRARIAN",
         allocation_pct=Decimal("0.15"),
-        max_per_trade_pct=Decimal("0.08"),
+        max_per_trade_pct=Decimal("0.05"),
         max_open_positions=3,
         take_profit_pct=Decimal("0.35"),
         stop_loss_pct=Decimal("0.20"),
@@ -132,6 +170,15 @@ STRATEGY_PROFILES: dict[str, StrategyBudget] = {
         max_hold_hours=48,
     ),
 }
+
+# ── Fail-fast invariants: catch a bad edit before it ever sizes a real trade ──
+_alloc_sum = sum(p.allocation_pct for p in STRATEGY_PROFILES.values())
+assert _alloc_sum <= Decimal("1.00"), (
+    f"Strategy allocations sum to {_alloc_sum} (>100% of capital)"
+)
+assert all(
+    p.max_per_trade_pct <= MAX_TRADE_FRACTION for p in STRATEGY_PROFILES.values()
+), f"A strategy exceeds the {MAX_TRADE_FRACTION:.0%} per-trade hard cap"
 
 
 class RiskManager:
@@ -188,16 +235,26 @@ class RiskManager:
         strategy: str,
         proposed_size: Decimal,
         balance: Decimal,
+        entry_price: Optional[Decimal] = None,
     ) -> tuple[bool, Decimal, str]:
         """Central gatekeeper: should this trade happen?  If so, how much?
 
+        This is the SINGLE enforcement point for the 5% rule.  The returned
+        size, once converted to a real Polymarket order (5-share minimum), is
+        guaranteed never to cost more than MAX_TRADE_FRACTION of `balance`.
+
         Args:
             strategy: Strategy name (ARB, SWING, MOMENTUM, etc.)
-            proposed_size: The amount the strategy wants to bet
+            proposed_size: The dollar amount the strategy wants to bet
             balance: Current USDC balance
+            entry_price: Per-share price.  When supplied, the gate accounts for
+                the 5-share exchange minimum and REJECTS trades whose smallest
+                legal order would breach the 5% cap (instead of silently
+                inflating them, which the old code did).
 
         Returns:
-            (allowed, adjusted_size, reason)
+            (allowed, adjusted_size, reason) — adjusted_size is the ACTUAL
+            dollar cost to debit (already share-floor aware when price given).
         """
         profile = STRATEGY_PROFILES.get(strategy.upper())
         if not profile:
@@ -225,33 +282,58 @@ class RiskManager:
         if open_count >= profile.max_open_positions:
             return False, Decimal("0"), f"{strategy} max positions reached ({open_count}/{profile.max_open_positions})"
 
-        # Check 3: Per-trade limit
+        # Check 3: Per-trade limit (per-strategy)
         per_trade_max = profile.per_trade_limit(balance)
 
-        # Check 4: Hard 10% rule per trade (was 5% — too restrictive for small balances)
-        absolute_max = (balance * Decimal("0.10")).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+        # Check 4: HARD 5% rule per trade — the non-negotiable risk ceiling.
+        absolute_max = (balance * MAX_TRADE_FRACTION).quantize(_CENT, rounding=ROUND_DOWN)
 
-        # Take the minimum of all limits
+        # Check 5: Portfolio reserve — total deployed must never eat the reserve.
+        # (Per-strategy budgets can collectively exceed available; this stops it.)
+        already_deployed = self.get_total_deployed()
+        portfolio_room = max(Decimal("0"), available - already_deployed)
+
+        # Take the minimum of all dollar limits
         max_allowed = min(
             proposed_size,
             per_trade_max,
             absolute_max,
             remaining_budget,
-            available,
+            portfolio_room,
         )
 
-        # Ensure minimum viable bet ($0.10 on Polymarket with 5 share minimum)
         if max_allowed < Decimal("0.10"):
-            return False, Decimal("0"), f"Trade too small after risk limits (${max_allowed:.2f})"
+            return False, Decimal("0"), (
+                f"Trade too small after risk limits (${max_allowed:.2f}); "
+                f"portfolio room ${portfolio_room:.2f}"
+            )
+
+        # Check 6: Share-floor reality check.  Convert the dollar budget into a
+        # real order and verify the ACTUAL cost still respects the 5% ceiling.
+        actual_cost = max_allowed
+        if entry_price is not None and entry_price > Decimal("0"):
+            shares, actual_cost = order_cost(max_allowed, entry_price)
+            if actual_cost > absolute_max:
+                # The 5-share minimum would push this order past 5%. Reject —
+                # do NOT inflate the bet past the risk ceiling.
+                return False, Decimal("0"), (
+                    f"{strategy} rejected: min order {shares} sh @ ${entry_price:.3f} "
+                    f"= ${actual_cost:.2f} > 5% cap ${absolute_max:.2f}"
+                )
+            if actual_cost > portfolio_room:
+                return False, Decimal("0"), (
+                    f"{strategy} rejected: min order ${actual_cost:.2f} exceeds "
+                    f"portfolio room ${portfolio_room:.2f}"
+                )
 
         reason = (
-            f"{strategy}: ${max_allowed:.2f} "
+            f"{strategy}: ${actual_cost:.2f} "
             f"(budget ${remaining_budget:.2f}/{budget:.2f}, "
-            f"per-trade cap ${per_trade_max:.2f}, "
+            f"5% cap ${absolute_max:.2f}, "
             f"{open_count}/{profile.max_open_positions} positions)"
         )
 
-        return True, max_allowed, reason
+        return True, actual_cost, reason
 
     def get_strategy_profile(self, strategy: str) -> StrategyBudget:
         """Get the exit/risk profile for a strategy."""

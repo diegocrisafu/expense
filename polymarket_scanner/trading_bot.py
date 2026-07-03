@@ -39,7 +39,7 @@ from .aggressive import AggressiveTrader
 from .position_manager import PositionManager
 from .smart_strategy import SmartStrategy
 from .swing_trader import SwingTrader
-from .risk_manager import RiskManager
+from .risk_manager import RiskManager, order_cost
 from .dashboard import start_web_dashboard, print_cli_dashboard
 from .quant_engine import QuantEngine, extract_features
 from .trading_config import (
@@ -51,6 +51,7 @@ from .trading_config import (
     DASHBOARD_PORT,
     MIN_GLOBAL_CONFIDENCE,
     MAX_ENTRY_PRICE,
+    MAX_TRADE_FRACTION,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,8 @@ class TradingBot:
         # ─── Event-level dedup: prevent multi-bucket bets on same event ───
         # e.g. betting on 5 Elon tweet-count ranges simultaneously
         self._recently_traded_events: set[str] = set()
+        # ─── Permanent blacklist: markets that repeatedly fail to fill ───
+        self._blacklisted_markets: set[str] = set()
         # Separate timer for dedup clearing (6 hours, not hourly)
         self._last_dedup_clear = datetime.utcnow()
         
@@ -135,6 +138,18 @@ class TradingBot:
                         self._recently_traded_markets.add(row[0])
                     if row[1]:
                         self._recently_traded_tokens.add(row[1])
+                # Blacklist markets with 3+ PENDING trades (never fill = dead/expired)
+                cursor.execute("""
+                    SELECT market_id, COUNT(*) as cnt FROM trade_history
+                    WHERE status = 'PENDING'
+                    GROUP BY market_id HAVING cnt >= 3
+                """)
+                for row in cursor.fetchall():
+                    if row[0]:
+                        self._blacklisted_markets.add(row[0])
+                        self._recently_traded_markets.add(row[0])
+                if self._blacklisted_markets:
+                    logger.info(f"Blacklisted {len(self._blacklisted_markets)} markets with repeated unfilled orders")
             logger.info(f"Dedup loaded: {len(self._recently_traded_markets)} markets, {len(self._recently_traded_tokens)} tokens from recent history")
         except Exception as e:
             logger.warning(f"Failed to load dedup history: {e}")
@@ -162,8 +177,10 @@ class TradingBot:
             self._recently_traded_markets.clear()
             self._recently_traded_tokens.clear()
             self._recently_traded_events.clear()
+            # Re-add blacklisted markets (they survive the clear)
+            self._recently_traded_markets.update(self._blacklisted_markets)
             self._last_dedup_clear = now
-            logger.info("Dedup sets cleared (2-hour cycle)")
+            logger.info(f"Dedup sets cleared (2-hour cycle), {len(self._blacklisted_markets)} blacklisted preserved")
         return self.trades_this_hour < MAX_TRADES_PER_HOUR
     
     def _get_event_key(self, market_question: str) -> str:
@@ -171,13 +188,20 @@ class TradingBot:
 
         Markets in the same event share question structure, e.g.:
           "Will Elon tweet 340-359 times?" and "Will Elon tweet 360-379 times?"
-        We normalize by stripping numbers and range patterns to get a common key.
+          "Will the Dallas Stars win the 2026 NHL Stanley Cup?"
+          "Will the Vegas Golden Knights win the 2026 NHL Stanley Cup?"
+        We normalize by stripping numbers, proper nouns, and range patterns.
         """
         import re
-        # Remove numbers, ranges (e.g. "340-359"), dollar amounts, percentages
-        key = re.sub(r'\d+[\.,]?\d*[%k]?', '#', market_question.lower())
-        # Remove range patterns like "#-#"
+        key = market_question.lower()
+        # Remove numbers, ranges, dollar amounts, percentages
+        key = re.sub(r'\d+[\.,]?\d*[%k]?', '#', key)
         key = re.sub(r'#\s*[-–to]+\s*#', '#RANGE#', key)
+        # Remove proper noun phrases (2+ capitalized words or "the X Y")
+        # This catches team names like "Dallas Stars", "Vegas Golden Knights"
+        key = re.sub(r'the\s+\w+(\s+\w+){0,3}\s+(win|lose|reach|make|get)', r'the SUBJ \2', key)
+        # Remove month names and date patterns
+        key = re.sub(r'(january|february|march|april|may|june|july|august|september|october|november|december)', 'MONTH', key)
         # Collapse whitespace
         key = re.sub(r'\s+', ' ', key).strip()
         return key
@@ -192,6 +216,9 @@ class TradingBot:
           2. Event-level dedup (same event = only 1 bet allowed)
           3. Database ACTIVE managed positions
         """
+        # Check blacklist first (permanent ban for repeatedly unfilled markets)
+        if market_id in self._blacklisted_markets:
+            return True
         # Check in-memory dedup (includes failed/unfilled attempts)
         if market_id in self._recently_traded_markets:
             return True
@@ -348,14 +375,19 @@ class TradingBot:
             if not market.outcomes:
                 continue
             
-            # Fetch orderbooks
-            orderbooks = {}
-            for outcome in market.outcomes:
-                if outcome.outcome_id:
-                    book = await self.clob.get_orderbook(outcome.outcome_id)
-                    if book:
-                        orderbooks[outcome.outcome_id] = book
-            
+            # Fetch orderbooks CONCURRENTLY — one gather instead of N serial
+            # round-trips.  For an N-outcome market this cuts latency ~N×.
+            ids = [o.outcome_id for o in market.outcomes if o.outcome_id]
+            books = await asyncio.gather(
+                *(self.clob.get_orderbook(tid) for tid in ids),
+                return_exceptions=True,
+            )
+            orderbooks = {
+                tid: book
+                for tid, book in zip(ids, books)
+                if book and not isinstance(book, Exception)
+            }
+
             if len(orderbooks) < len(market.outcomes):
                 continue
             
@@ -491,7 +523,7 @@ class TradingBot:
 
             # Risk manager decides size
             allowed, bet_size, risk_reason = self.risk_manager.check_trade(
-                "SWING", SIGNAL_BET_SIZE, balance
+                "SWING", SIGNAL_BET_SIZE, balance, entry_price=sig.current_price
             )
             if not allowed:
                 logger.info(f"Swing blocked: {risk_reason}")
@@ -543,9 +575,8 @@ class TradingBot:
                 sig.token_id, sig.side,
                 sig.current_price, f"swing_{sig.mode}",
             ):
-                shares = bet_size / sig.current_price if sig.current_price > 0 else Decimal("5")
-                shares = max(shares, Decimal("5"))
-                
+                shares, actual_cost = order_cost(bet_size, sig.current_price)
+
                 self.position_manager.register_position(
                     trade_id=trade_id,
                     market_id=sig.market_id,
@@ -558,9 +589,9 @@ class TradingBot:
                     stop_loss_pct=profile.stop_loss_pct,
                     trailing_stop_pct=profile.trailing_stop_pct,
                 )
-                
+
                 self.swing_trader.record_trade(sig.token_id)
-                self.executor.balance -= bet_size
+                self.executor.balance -= actual_cost
                 traded += 1
                 self.trades_this_hour += 1
                 print(f"   ✅ Swing trade executed! (TP +{profile.take_profit_pct:.0%} / SL -{profile.stop_loss_pct:.0%})")
@@ -576,9 +607,9 @@ class TradingBot:
         
         # ─── 4a: Momentum ───
         momentum_signals = await self.aggressive_trader.find_momentum_opportunities(
-            min_price_change=Decimal("0.02"),
-            min_volume=Decimal("3000"),
-            max_opportunities=5,
+            min_price_change=Decimal("0.01"),
+            min_volume=Decimal("1000"),
+            max_opportunities=8,
         )
 
         for signal in momentum_signals:
@@ -604,7 +635,7 @@ class TradingBot:
 
             # Risk manager gate
             allowed, bet_size, risk_reason = self.risk_manager.check_trade(
-                "MOMENTUM", SIGNAL_BET_SIZE, balance
+                "MOMENTUM", SIGNAL_BET_SIZE, balance, entry_price=signal.current_price
             )
             if not allowed:
                 logger.info(f"Momentum blocked: {risk_reason}")
@@ -657,19 +688,18 @@ class TradingBot:
                 signal.current_price,
                 f"momentum_{signal.rationale[:20]}",
             ):
-                shares = bet_size / signal.current_price if signal.current_price > 0 else Decimal("5")
-                shares = max(shares, Decimal("5"))
-                
-                # Track for resolution
+                shares, actual_cost = order_cost(bet_size, signal.current_price)
+
+                # Track for resolution (size is SHARES, not dollars)
                 self.resolution_tracker.record_position(
                     trade_id=trade_id,
                     market_id=signal.market_id,
                     token_id=signal.token_id,
                     side=signal.side,
                     entry_price=signal.current_price,
-                    size=bet_size,
+                    size=shares,
                 )
-                
+
                 # Register with per-strategy exit profile
                 self.position_manager.register_position(
                     trade_id=trade_id,
@@ -683,14 +713,204 @@ class TradingBot:
                     stop_loss_pct=mom_profile.stop_loss_pct,
                     trailing_stop_pct=mom_profile.trailing_stop_pct,
                 )
-                
+
                 self.aggressive_trader.record_trade(signal.market_id)
-                self.executor.balance -= bet_size
+                self.executor.balance -= actual_cost
                 traded += 1
                 self.trades_this_hour += 1
                 print(f"   ✅ Trade executed! (${bet_size:.2f})")
         
-        # ─── 4b: Smart strategies (contrarian, correlation, vol spike) ───
+        # ─── 4b: Value Hunter (cheap asymmetric bets) ───
+        if traded < 6:
+            value_signals = await self.aggressive_trader.find_value_bets(
+                max_opportunities=5,
+            )
+
+            for signal in value_signals:
+                if traded >= 6:
+                    break
+
+                if signal.confidence < MIN_GLOBAL_CONFIDENCE:
+                    continue
+                if signal.current_price > Decimal("0.15"):
+                    continue  # Value bets must be cheap
+                if self._has_position_in_market(signal.market_id, signal.token_id, signal.market_question):
+                    continue
+
+                balance = self.executor.get_balance()
+                allowed, bet_size, risk_reason = self.risk_manager.check_trade(
+                    "MOMENTUM", SIGNAL_BET_SIZE, balance, entry_price=signal.current_price
+                )
+                if not allowed:
+                    continue
+
+                val_profile = self.risk_manager.get_strategy_profile("MOMENTUM")
+
+                # Quant engine scoring
+                features = extract_features(
+                    strategy="MOMENTUM", mode="value_hunter", side=signal.side,
+                    price=float(signal.current_price),
+                    volume_24h=float(signal.volume_24h),
+                    edge=float(signal.confidence) * 0.08,
+                    confidence=signal.confidence,
+                    liquidity_score=min(1.0, float(signal.volume_24h) / 100000),
+                )
+                quant_score = self.quant_engine.score_opportunity(features)
+                if not quant_score.should_trade:
+                    logger.info(f"Value blocked by quant engine: {quant_score.reason}")
+                    continue
+
+                if quant_score.recommended_size_pct > 0:
+                    quant_bet = (balance * Decimal(str(quant_score.recommended_size_pct))).quantize(Decimal("0.01"))
+                    bet_size = min(bet_size, max(Decimal("0.10"), quant_bet))
+
+                print(f"\n💎 VALUE: {signal.market_question[:50]}...")
+                print(f"   {signal.rationale} | Confidence: {signal.confidence:.0%}")
+                print(f"   Price: ${signal.current_price:.3f} | Bet: ${bet_size:.2f}")
+
+                self._mark_market_traded(signal.market_id, signal.token_id, signal.market_question)
+
+                trade_id = self.learning.record_trade(
+                    strategy="MOMENTUM",
+                    market_id=signal.market_id,
+                    market_question=signal.market_question,
+                    token_id=signal.token_id,
+                    side=signal.side,
+                    entry_price=signal.current_price,
+                    size=bet_size,
+                    category="value_hunter",
+                )
+
+                if self.executor.execute_signal_trade(
+                    signal.token_id, signal.side,
+                    signal.current_price, "value_hunter",
+                ):
+                    shares, actual_cost = order_cost(bet_size, signal.current_price)
+
+                    self.resolution_tracker.record_position(
+                        trade_id=trade_id,
+                        market_id=signal.market_id,
+                        token_id=signal.token_id,
+                        side=signal.side,
+                        entry_price=signal.current_price,
+                        size=shares,
+                    )
+
+                    self.position_manager.register_position(
+                        trade_id=trade_id,
+                        market_id=signal.market_id,
+                        token_id=signal.token_id,
+                        side=signal.side,
+                        entry_price=signal.current_price,
+                        size=shares,
+                        market_question=signal.market_question,
+                        take_profit_pct=val_profile.take_profit_pct,
+                        stop_loss_pct=val_profile.stop_loss_pct,
+                        trailing_stop_pct=val_profile.trailing_stop_pct,
+                    )
+
+                    self.aggressive_trader.record_trade(signal.market_id)
+                    self.executor.balance -= actual_cost
+                    traded += 1
+                    self.trades_this_hour += 1
+                    print(f"   ✅ Value trade executed! (${bet_size:.2f})")
+
+        # ─── 4c: Mispriced markets (YES/NO edge scanner) ───
+        if traded < 6:
+            mispriced_signals = await self.aggressive_trader.find_mispriced_markets(
+                max_opportunities=5,
+            )
+
+            for signal in mispriced_signals:
+                if traded >= 6:
+                    break
+
+                if signal.confidence < MIN_GLOBAL_CONFIDENCE:
+                    continue
+                if signal.current_price > MAX_ENTRY_PRICE:
+                    continue
+                if self._has_position_in_market(signal.market_id, signal.token_id, signal.market_question):
+                    continue
+
+                balance = self.executor.get_balance()
+                allowed, bet_size, risk_reason = self.risk_manager.check_trade(
+                    "CORRELATED", SIGNAL_BET_SIZE, balance, entry_price=signal.current_price
+                )
+                if not allowed:
+                    continue
+
+                misp_profile = self.risk_manager.get_strategy_profile("CORRELATED")
+
+                # Quant engine scoring
+                features = extract_features(
+                    strategy="CORRELATED", mode="mispriced", side=signal.side,
+                    price=float(signal.current_price),
+                    volume_24h=float(signal.volume_24h),
+                    edge=float(signal.confidence) * 0.10,  # approximate edge from confidence
+                    confidence=signal.confidence,
+                    liquidity_score=min(1.0, float(signal.volume_24h) / 100000),
+                )
+                quant_score = self.quant_engine.score_opportunity(features)
+                if not quant_score.should_trade:
+                    logger.info(f"Mispriced blocked by quant engine: {quant_score.reason}")
+                    continue
+
+                if quant_score.recommended_size_pct > 0:
+                    quant_bet = (balance * Decimal(str(quant_score.recommended_size_pct))).quantize(Decimal("0.01"))
+                    bet_size = min(bet_size, max(Decimal("0.10"), quant_bet))
+
+                print(f"\n🎯 MISPRICED: {signal.market_question[:50]}...")
+                print(f"   {signal.rationale} | Confidence: {signal.confidence:.0%}")
+                print(f"   Price: ${signal.current_price:.3f} | Bet: ${bet_size:.2f}")
+
+                self._mark_market_traded(signal.market_id, signal.token_id, signal.market_question)
+
+                trade_id = self.learning.record_trade(
+                    strategy="CORRELATED",
+                    market_id=signal.market_id,
+                    market_question=signal.market_question,
+                    token_id=signal.token_id,
+                    side=signal.side,
+                    entry_price=signal.current_price,
+                    size=bet_size,
+                    category="mispriced",
+                )
+
+                if self.executor.execute_signal_trade(
+                    signal.token_id, signal.side,
+                    signal.current_price, "mispriced_edge",
+                ):
+                    shares, actual_cost = order_cost(bet_size, signal.current_price)
+
+                    self.resolution_tracker.record_position(
+                        trade_id=trade_id,
+                        market_id=signal.market_id,
+                        token_id=signal.token_id,
+                        side=signal.side,
+                        entry_price=signal.current_price,
+                        size=shares,
+                    )
+
+                    self.position_manager.register_position(
+                        trade_id=trade_id,
+                        market_id=signal.market_id,
+                        token_id=signal.token_id,
+                        side=signal.side,
+                        entry_price=signal.current_price,
+                        size=shares,
+                        market_question=signal.market_question,
+                        take_profit_pct=misp_profile.take_profit_pct,
+                        stop_loss_pct=misp_profile.stop_loss_pct,
+                        trailing_stop_pct=misp_profile.trailing_stop_pct,
+                    )
+
+                    self.aggressive_trader.record_trade(signal.market_id)
+                    self.executor.balance -= actual_cost
+                    traded += 1
+                    self.trades_this_hour += 1
+                    print(f"   ✅ Mispriced trade executed! (${bet_size:.2f})")
+
+        # ─── 4c: Smart strategies (contrarian, correlation, vol spike) ───
         if traded < 6:
             smart_signals = await self.smart_strategy.generate_all_signals(max_signals=8)
 
@@ -727,7 +947,7 @@ class TradingBot:
                 # Risk manager gate
                 strat_name = sig.strategy.upper()
                 allowed, bet_size, risk_reason = self.risk_manager.check_trade(
-                    strat_name, SIGNAL_BET_SIZE, balance
+                    strat_name, SIGNAL_BET_SIZE, balance, entry_price=sig.current_price
                 )
                 if not allowed:
                     logger.info(f"Smart [{strat_name}] blocked: {risk_reason}")
@@ -777,18 +997,17 @@ class TradingBot:
                     sig.token_id, sig.side,
                     sig.current_price, f"smart_{sig.strategy}",
                 ):
-                    shares = bet_size / sig.current_price if sig.current_price > 0 else Decimal("5")
-                    shares = max(shares, Decimal("5"))
-                    
+                    shares, actual_cost = order_cost(bet_size, sig.current_price)
+
                     self.resolution_tracker.record_position(
                         trade_id=trade_id,
                         market_id=sig.market_id,
                         token_id=sig.token_id,
                         side=sig.side,
                         entry_price=sig.current_price,
-                        size=bet_size,
+                        size=shares,
                     )
-                    
+
                     self.position_manager.register_position(
                         trade_id=trade_id,
                         market_id=sig.market_id,
@@ -801,9 +1020,9 @@ class TradingBot:
                         stop_loss_pct=smart_profile.stop_loss_pct,
                         trailing_stop_pct=smart_profile.trailing_stop_pct,
                     )
-                    
+
                     self.smart_strategy.record_signal(sig.token_id)
-                    self.executor.balance -= bet_size
+                    self.executor.balance -= actual_cost
                     traded += 1
                     self.trades_this_hour += 1
                     print(f"   ✅ Smart trade executed! (${bet_size:.2f})")
@@ -823,7 +1042,7 @@ class TradingBot:
         print(f"Mode: {'PAPER TRADING' if self.paper_trading else '🔴 LIVE TRADING'}")
         print(f"Balance: ${self.executor.balance}")
         print(f"Base bets: Arb ${ARB_BET_SIZE} | Signal ${SIGNAL_BET_SIZE}")
-        print(f"Risk rule: Max 5% per trade | $1.00 reserve floor")
+        print(f"Risk rule: HARD max {MAX_TRADE_FRACTION:.0%} of balance per trade | ${STOP_LOSS_THRESHOLD} reserve floor")
         print(f"Strategies: ARB · SWING · MOMENTUM · CORRELATED")
         print(f"Quant Engine: Bayesian scoring · calibration · feature learning")
         print(f"Dashboard: http://localhost:{DASHBOARD_PORT}")
@@ -912,6 +1131,9 @@ class TradingBot:
         self.position_manager.print_position_report()
         self.resolution_tracker.print_position_report()
         self.learning.print_performance_report()
+        # Realised, cost-adjusted scorecard — the objective measure of "better".
+        from .metrics import print_report as print_metrics_report
+        print_metrics_report(DB_PATH)
         print(f"\n🏁 Bot stopped. Final balance: ${self.executor.get_balance()}")
         print(f"   Capital recycled: ${self.capital_recycled:.2f}")
     
