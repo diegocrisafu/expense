@@ -74,6 +74,14 @@ SMART_EXIT_MIN_HEALTH_PROFIT = 0.40
 # Lightweight price checks happen every cycle; full analysis runs at this interval.
 SMART_EXIT_INTERVAL = 60
 
+# === COST-EDGE GATE ===
+# When True, the risk manager rejects any trade whose estimated edge cannot beat
+# round-trip costs (fees + slippage) by costs.MIN_NET_EDGE, and sizes accepted
+# trades by quarter-Kelly on the net-of-cost edge.  This is the principled filter
+# that stops the bot paying fees to take coin-flips.  Expect it to block most
+# weak signals — that is correct: those trades were -EV.  Tune via costs.py.
+ENFORCE_COST_EDGE_GATE = True
+
 # === DATA QUARANTINE ===
 # All trade history before this date was recorded by buggy accounting:
 #   • placeholder exit prices (0.5) → hallucinated take-profits

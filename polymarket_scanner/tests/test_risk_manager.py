@@ -228,3 +228,65 @@ def test_every_strategy_respects_5pct_per_trade():
         p.max_per_trade_pct <= MAX_TRADE_FRACTION
         for p in STRATEGY_PROFILES.values()
     )
+
+
+class TestCostEdgeGate:
+    """The gate that stops the bot paying fees to take coin-flips."""
+
+    def _mgr(self):
+        return RiskManager(db_path=":memory:")
+
+    @patch.object(RiskManager, "get_deployed_by_strategy", return_value=(Decimal("0"), 0))
+    @patch.object(RiskManager, "get_total_deployed", return_value=Decimal("0"))
+    def test_rejects_edge_below_costs(self, m_total, m_dep):
+        """A thin edge that can't beat round-trip costs is rejected."""
+        mgr = self._mgr()
+        # 1% gross edge vs ~5% round-trip cost → net negative → reject.
+        allowed, size, reason = mgr.check_trade(
+            "SWING", Decimal("1.00"), Decimal("100.00"),
+            entry_price=Decimal("0.30"), gross_edge=Decimal("0.01"),
+        )
+        assert allowed is False
+        assert "net edge" in reason.lower()
+
+    @patch.object(RiskManager, "get_deployed_by_strategy", return_value=(Decimal("0"), 0))
+    @patch.object(RiskManager, "get_total_deployed", return_value=Decimal("0"))
+    def test_accepts_fat_edge(self, m_total, m_dep):
+        """A healthy edge that clears costs is allowed."""
+        mgr = self._mgr()
+        allowed, size, reason = mgr.check_trade(
+            "SWING", Decimal("5.00"), Decimal("100.00"),
+            entry_price=Decimal("0.30"), gross_edge=Decimal("0.20"),
+        )
+        assert allowed is True
+        assert size > Decimal("0")
+
+    @patch.object(RiskManager, "get_deployed_by_strategy", return_value=(Decimal("0"), 0))
+    @patch.object(RiskManager, "get_total_deployed", return_value=Decimal("0"))
+    def test_bigger_edge_sizes_bigger(self, m_total, m_dep):
+        """More edge → more capital (both still <= 5%)."""
+        mgr = self._mgr()
+        _, small, _ = mgr.check_trade(
+            "SWING", Decimal("99"), Decimal("1000"),
+            entry_price=Decimal("0.30"), gross_edge=Decimal("0.08"),
+        )
+        _, big, _ = mgr.check_trade(
+            "SWING", Decimal("99"), Decimal("1000"),
+            entry_price=Decimal("0.30"), gross_edge=Decimal("0.30"),
+        )
+        assert big > small
+        # Both respect the 5% ceiling.
+        assert big <= Decimal("1000") * MAX_TRADE_FRACTION
+
+    @patch.object(RiskManager, "get_deployed_by_strategy", return_value=(Decimal("0"), 0))
+    @patch.object(RiskManager, "get_total_deployed", return_value=Decimal("0"))
+    def test_edge_sizing_never_breaches_5pct(self, m_total, m_dep):
+        """Even a huge edge cannot push the bet past 5%."""
+        mgr = self._mgr()
+        _, size, _ = mgr.check_trade(
+            "MOMENTUM", Decimal("99"), Decimal("100"),
+            entry_price=Decimal("0.10"), gross_edge=Decimal("0.90"),
+        )
+        from polymarket_scanner.risk_manager import order_cost
+        _, cost = order_cost(size, Decimal("0.10"))
+        assert cost <= Decimal("100") * MAX_TRADE_FRACTION + Decimal("0.01")

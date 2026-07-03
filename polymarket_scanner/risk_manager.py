@@ -236,6 +236,7 @@ class RiskManager:
         proposed_size: Decimal,
         balance: Decimal,
         entry_price: Optional[Decimal] = None,
+        gross_edge: Optional[Decimal] = None,
     ) -> tuple[bool, Decimal, str]:
         """Central gatekeeper: should this trade happen?  If so, how much?
 
@@ -251,6 +252,13 @@ class RiskManager:
                 the 5-share exchange minimum and REJECTS trades whose smallest
                 legal order would breach the 5% cap (instead of silently
                 inflating them, which the old code did).
+            gross_edge: The strategy's estimated edge (as a price fraction).
+                When supplied with a price and the cost-edge gate is enabled,
+                the trade is REJECTED unless its edge beats round-trip costs by
+                MIN_NET_EDGE, and the bet is sized by quarter-Kelly on the NET
+                (after-cost) edge — better edges get more capital, up to 5%.
+                This is the principled anti-(-EV) filter: it stops the bot from
+                paying fees to take coin-flips.
 
         Returns:
             (allowed, adjusted_size, reason) — adjusted_size is the ACTUAL
@@ -293,6 +301,25 @@ class RiskManager:
         already_deployed = self.get_total_deployed()
         portfolio_room = max(Decimal("0"), available - already_deployed)
 
+        # Check 6: COST-EDGE GATE + edge-based sizing.  A trade whose edge cannot
+        # beat round-trip costs is -EV — reject it.  Otherwise size by
+        # quarter-Kelly on the net edge so better trades get more (still <=5%).
+        edge_cap = absolute_max  # no-op unless edge supplied
+        if gross_edge is not None and entry_price is not None and entry_price > Decimal("0"):
+            from .trading_config import ENFORCE_COST_EDGE_GATE
+            from .costs import net_edge, MIN_NET_EDGE
+            from .edge import kelly_fraction
+
+            ne = net_edge(Decimal(str(gross_edge)), entry_price)
+            if ENFORCE_COST_EDGE_GATE and ne < MIN_NET_EDGE:
+                return False, Decimal("0"), (
+                    f"{strategy} rejected: net edge {ne:+.1%} < min {MIN_NET_EDGE:.1%} "
+                    f"after fees+slippage (gross {Decimal(str(gross_edge)):+.1%} @ ${entry_price:.3f})"
+                )
+            kelly = kelly_fraction(ne, entry_price)  # quarter-Kelly, already capped
+            if kelly > Decimal("0"):
+                edge_cap = (balance * kelly).quantize(_CENT, rounding=ROUND_DOWN)
+
         # Take the minimum of all dollar limits
         max_allowed = min(
             proposed_size,
@@ -300,6 +327,7 @@ class RiskManager:
             absolute_max,
             remaining_budget,
             portfolio_room,
+            edge_cap,
         )
 
         if max_allowed < Decimal("0.10"):

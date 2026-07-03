@@ -523,7 +523,8 @@ class TradingBot:
 
             # Risk manager decides size
             allowed, bet_size, risk_reason = self.risk_manager.check_trade(
-                "SWING", SIGNAL_BET_SIZE, balance, entry_price=sig.current_price
+                "SWING", SIGNAL_BET_SIZE, balance,
+                entry_price=sig.current_price, gross_edge=sig.edge_estimate,
             )
             if not allowed:
                 logger.info(f"Swing blocked: {risk_reason}")
@@ -635,7 +636,9 @@ class TradingBot:
 
             # Risk manager gate
             allowed, bet_size, risk_reason = self.risk_manager.check_trade(
-                "MOMENTUM", SIGNAL_BET_SIZE, balance, entry_price=signal.current_price
+                "MOMENTUM", SIGNAL_BET_SIZE, balance,
+                entry_price=signal.current_price,
+                gross_edge=Decimal(str(signal.confidence)) * Decimal("0.08"),
             )
             if not allowed:
                 logger.info(f"Momentum blocked: {risk_reason}")
@@ -739,7 +742,9 @@ class TradingBot:
 
                 balance = self.executor.get_balance()
                 allowed, bet_size, risk_reason = self.risk_manager.check_trade(
-                    "MOMENTUM", SIGNAL_BET_SIZE, balance, entry_price=signal.current_price
+                    "MOMENTUM", SIGNAL_BET_SIZE, balance,
+                    entry_price=signal.current_price,
+                    gross_edge=Decimal(str(signal.confidence)) * Decimal("0.08"),
                 )
                 if not allowed:
                     continue
@@ -834,7 +839,9 @@ class TradingBot:
 
                 balance = self.executor.get_balance()
                 allowed, bet_size, risk_reason = self.risk_manager.check_trade(
-                    "CORRELATED", SIGNAL_BET_SIZE, balance, entry_price=signal.current_price
+                    "CORRELATED", SIGNAL_BET_SIZE, balance,
+                    entry_price=signal.current_price,
+                    gross_edge=Decimal(str(signal.confidence)) * Decimal("0.10"),
                 )
                 if not allowed:
                     continue
@@ -947,7 +954,8 @@ class TradingBot:
                 # Risk manager gate
                 strat_name = sig.strategy.upper()
                 allowed, bet_size, risk_reason = self.risk_manager.check_trade(
-                    strat_name, SIGNAL_BET_SIZE, balance, entry_price=sig.current_price
+                    strat_name, SIGNAL_BET_SIZE, balance,
+                    entry_price=sig.current_price, gross_edge=sig.edge_estimate,
                 )
                 if not allowed:
                     logger.info(f"Smart [{strat_name}] blocked: {risk_reason}")
