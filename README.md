@@ -353,7 +353,13 @@ The web dashboard runs locally at `http://localhost:8080` and is mirrored on [Gi
 - **Positions** — open positions with live P&L and TP/SL targets, plus recent exits
 - **News** — market-moving headlines by category, refreshed every 15 minutes
 
-Light/dark theme included. The GitHub Pages copy shows live news always; trading stats require the local API (a banner explains this when it's unreachable).
+Light/dark theme included. The page prefers the live local API; when that's unreachable (i.e. on GitHub Pages) it falls back to a published `data.json` snapshot and shows how old the data is. To refresh the public tracker:
+
+```bash
+./publish_tracker.sh   # export data.json from the local DB, commit, push
+```
+
+Schedule it (e.g. `0 */3 * * *` in cron) to keep the public page current.
 
 ## Database
 
