@@ -34,15 +34,13 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
 import httpx
 
 from .config import GAMMA_API_BASE
-from .trading_config import CLOB_HOST
-from .edge import analyze_market_data, validate_proposed_side, MAX_SPREAD_SCALP
+from .edge import analyze_market_data, is_market_expired, validate_proposed_side, MAX_SPREAD_SCALP
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +146,7 @@ class SwingTrader:
                     params={
                         "active": "true",
                         "closed": "false",
-                        "limit": 100,
+                        "limit": 200,
                         "order": "volume24hr",
                         "ascending": "false",
                     },
@@ -169,6 +167,8 @@ class SwingTrader:
 
     def _evaluate_momentum_scalp(self, market: dict) -> Optional[SwingSignal]:
         """Check if a market is a good momentum scalp target."""
+        if is_market_expired(market):
+            return None
         one_hour_change = market.get("oneHourPriceChange")
         volume_24h = Decimal(str(market.get("volume24hr", 0)))
         best_ask = market.get("bestAsk")
@@ -182,11 +182,11 @@ class SwingTrader:
         yes_price = Decimal(str(best_ask))
 
         # Filters — relaxed to find more opportunities
-        if abs(price_change) < Decimal("0.02"):
+        if abs(price_change) < Decimal("0.01"):
             return None
-        if volume_24h < Decimal("5000") or (volume_num and int(volume_num) < 50):
+        if volume_24h < Decimal("2000") or (volume_num and int(volume_num) < 20):
             return None
-        if yes_price < Decimal("0.08") or yes_price > Decimal("0.90"):
+        if yes_price < Decimal("0.05") or yes_price > Decimal("0.90"):
             return None
 
         # Edge analysis — spread gate + side validation
@@ -246,7 +246,7 @@ class SwingTrader:
             async with httpx.AsyncClient() as client:
                 resp = await client.get(
                     f"{GAMMA_API_BASE}/markets",
-                    params={"active": "true", "closed": "false", "limit": 100},
+                    params={"active": "true", "closed": "false", "limit": 200},
                     timeout=30.0,
                 )
                 resp.raise_for_status()
@@ -264,6 +264,8 @@ class SwingTrader:
 
     def _evaluate_dip_scalp(self, market: dict) -> Optional[SwingSignal]:
         """Check if a market dipped and is likely to bounce."""
+        if is_market_expired(market):
+            return None
         one_hour_change = market.get("oneHourPriceChange")
         volume_24h = Decimal(str(market.get("volume24hr", 0)))
         best_ask = market.get("bestAsk")
@@ -275,18 +277,18 @@ class SwingTrader:
 
         price_change = Decimal(str(one_hour_change))
 
-        # Need sharp drop (>2%) — these often bounce
-        if price_change > Decimal("-0.02"):
+        # Need a meaningful drop (>1.5%) — these often bounce
+        if price_change > Decimal("-0.015"):
             return None
         # But not a total collapse (>20% = probably news, don't fight it)
         if price_change < Decimal("-0.20"):
             return None
         # Need liquidity
-        if volume_24h < Decimal("5000"):
+        if volume_24h < Decimal("2000"):
             return None
 
         yes_price = Decimal(str(best_ask))
-        if yes_price < Decimal("0.08") or yes_price > Decimal("0.90"):
+        if yes_price < Decimal("0.05") or yes_price > Decimal("0.90"):
             return None
 
         # Edge analysis — spread gate
@@ -347,7 +349,7 @@ class SwingTrader:
                     params={
                         "active": "true",
                         "closed": "false",
-                        "limit": 100,
+                        "limit": 200,
                     },
                     timeout=30.0,
                 )
@@ -366,6 +368,8 @@ class SwingTrader:
 
     def _evaluate_range_scalp(self, market: dict) -> Optional[SwingSignal]:
         """Check if a market is range-bound and near support."""
+        if is_market_expired(market):
+            return None
         volume_24h = Decimal(str(market.get("volume24hr", 0)))
         one_hour_change = market.get("oneHourPriceChange")
         best_ask = market.get("bestAsk")
@@ -380,18 +384,18 @@ class SwingTrader:
         bid_price = Decimal(str(best_bid))
 
         # For range trading, we want STABLE markets (small 1h change)
-        if price_change > Decimal("0.03"):
+        if price_change > Decimal("0.04"):
             return None
         # Need decent volume (active market)
-        if volume_24h < Decimal("8000"):
+        if volume_24h < Decimal("3000"):
             return None
         # Price in sweet spot for range trading
-        if yes_price < Decimal("0.10") or yes_price > Decimal("0.70"):
+        if yes_price < Decimal("0.08") or yes_price > Decimal("0.75"):
             return None
 
         # Spread check: tighter spread = better for scalping
         spread = yes_price - bid_price
-        if spread > Decimal("0.07"):
+        if spread > Decimal("0.08"):
             return None  # too wide, slippage will kill profits
 
         # Edge analysis — extra spread validation

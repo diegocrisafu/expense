@@ -17,7 +17,6 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
@@ -29,6 +28,7 @@ from .edge import (
     analyze_market_data,
     analyze_binary_market,
     analyze_event,
+    is_market_expired,
     validate_proposed_side,
     MAX_SPREAD_SCALP,
 )
@@ -123,21 +123,25 @@ class SmartStrategy:
         """Find markets where price dropped sharply and may bounce.
 
         Logic:
-        - Price fell >5% in 1h but volume stayed moderate → panic sell, buy the dip
-        - Price spiked >8% on low volume → likely to revert, sell / buy the other side
+        - Price fell >3% in 1h but volume stayed moderate → panic sell, buy the dip
+        - Price spiked >5% on low volume → likely to revert, sell / buy the other side
         """
         signals = []
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.get(
                     f"{GAMMA_API_BASE}/markets",
-                    params={"active": "true", "closed": "false", "limit": 100},
+                    params={"active": "true", "closed": "false", "limit": 200},
                     timeout=30.0,
                 )
                 resp.raise_for_status()
                 markets = resp.json()
 
                 for market in markets:
+                    # Skip expired markets
+                    if is_market_expired(market):
+                        continue
+
                     one_hour_change = market.get("oneHourPriceChange")
                     volume_24h = Decimal(str(market.get("volume24hr", 0)))
                     if one_hour_change is None:
@@ -159,8 +163,8 @@ class SmartStrategy:
                     market_id = market.get("conditionId", market.get("id", ""))
 
                     # --- Dip buying (contrarian) ---
-                    # Price dropped >5% in 1h, volume not exploding (no structural news)
-                    if price_change < Decimal("-0.05") and volume_24h < Decimal("50000"):
+                    # Price dropped >3% in 1h, volume not exploding (no structural news)
+                    if price_change < Decimal("-0.03") and volume_24h < Decimal("50000"):
                         # Edge check: is YES actually underpriced after the drop?
                         analysis = analyze_market_data(market)
                         if analysis is None:
@@ -198,7 +202,7 @@ class SmartStrategy:
                             ))
 
                     # --- Spike selling (fade the rally) ---
-                    if price_change > Decimal("0.08") and volume_24h < Decimal("30000"):
+                    if price_change > Decimal("0.05") and volume_24h < Decimal("50000"):
                         # Edge check: is NO underpriced after the spike?
                         analysis = analyze_market_data(market)
                         if analysis is None:
@@ -249,13 +253,17 @@ class SmartStrategy:
             async with httpx.AsyncClient() as client:
                 resp = await client.get(
                     f"{GAMMA_API_BASE}/markets",
-                    params={"active": "true", "closed": "false", "limit": 100},
+                    params={"active": "true", "closed": "false", "limit": 200},
                     timeout=30.0,
                 )
                 resp.raise_for_status()
                 markets = resp.json()
 
                 for market in markets:
+                    # Skip expired markets
+                    if is_market_expired(market):
+                        continue
+
                     one_hour_change = market.get("oneHourPriceChange")
                     volume_24h = Decimal(str(market.get("volume24hr", 0)))
                     volume_num = market.get("volumeNum", 0)  # number of trades
@@ -278,9 +286,9 @@ class SmartStrategy:
                     # High trade count (many trades) but small price move
                     # This signals accumulation by informed traders
                     if (
-                        volume_num and int(volume_num) > 100 and
-                        volume_24h > Decimal("5000") and
-                        price_change < Decimal("0.02")  # less than 2% move
+                        volume_num and int(volume_num) > 50 and
+                        volume_24h > Decimal("3000") and
+                        price_change < Decimal("0.03")  # less than 3% move
                     ):
                         # Edge check: which side is being accumulated?
                         analysis = analyze_market_data(market)
@@ -339,7 +347,7 @@ class SmartStrategy:
                 # Get events (groups of related markets)
                 resp = await client.get(
                     f"{GAMMA_API_BASE}/events",
-                    params={"active": "true", "closed": "false", "limit": 50},
+                    params={"active": "true", "closed": "false", "limit": 100},
                     timeout=30.0,
                 )
                 resp.raise_for_status()
@@ -362,6 +370,14 @@ class SmartStrategy:
                                 "price": Decimal(str(best_ask)),
                             })
 
+                    if len(dated_markets) < 2:
+                        continue
+
+                    # Filter out expired markets (end date in the past)
+                    dated_markets = [
+                        dm for dm in dated_markets
+                        if not is_market_expired(dm["market"])
+                    ]
                     if len(dated_markets) < 2:
                         continue
 
@@ -434,13 +450,22 @@ class SmartStrategy:
             async with httpx.AsyncClient() as client:
                 resp = await client.get(
                     f"{GAMMA_API_BASE}/events",
-                    params={"active": "true", "closed": "false", "limit": 50},
+                    params={"active": "true", "closed": "false", "limit": 100},
                     timeout=30.0,
                 )
                 resp.raise_for_status()
                 events = resp.json()
 
                 for event in events:
+                    # Filter expired markets from the event before analysis
+                    if "markets" in event:
+                        event["markets"] = [
+                            m for m in event["markets"]
+                            if not is_market_expired(m)
+                        ]
+                        if len(event["markets"]) < 2:
+                            continue
+
                     event_edge = analyze_event(event)
                     if event_edge is None or not event_edge.mispricings:
                         continue
