@@ -452,3 +452,39 @@ def start_web_dashboard(port: int = 8080, db_path: str = None):
     print(f"  🌐 Dashboard running at http://localhost:{port}")
     logger.info(f"Web dashboard started on port {port}")
     return thread
+
+
+# =====================================================================
+# Static snapshot export — makes the GitHub Pages tracker work.
+# GitHub Pages can't run this server, so the page falls back to a
+# committed data.json when /api/data is unreachable.
+# =====================================================================
+def export_snapshot(path: str, db_path: str = None, include_news: bool = True) -> dict:
+    """Write the full dashboard payload (plus news) to a static JSON file."""
+    data = DashboardData(db_path)
+    snapshot = data.get_full_snapshot()
+    snapshot["generated_at"] = datetime.utcnow().isoformat() + "Z"
+    if include_news:
+        snapshot["news"] = fetch_news()
+    with open(path, "w") as f:
+        json.dump(snapshot, f, default=str)
+    logger.info(f"Snapshot exported to {path}")
+    return snapshot
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Dashboard utilities")
+    parser.add_argument("--export", metavar="PATH",
+                        help="Export a static data.json snapshot for GitHub Pages")
+    parser.add_argument("--no-news", action="store_true",
+                        help="Skip fetching news for the snapshot")
+    args = parser.parse_args()
+
+    if args.export:
+        snap = export_snapshot(args.export, include_news=not args.no_news)
+        print(f"Exported {args.export}: balance ${snap['balance']:.2f}, "
+              f"{len(snap.get('all_bets', []))} bets, {len(snap.get('news', []))} news items")
+    else:
+        parser.print_help()

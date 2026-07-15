@@ -155,9 +155,10 @@ tbody tr:hover{background:var(--bg-hover)}
 /* CARD TITLE ICONS */
 .card-title svg{width:14px;height:14px;stroke:var(--accent-glow);flex-shrink:0}
 
-/* OFFLINE BANNER */
+/* STATUS BANNER (snapshot info / offline warning) */
 .api-banner{display:none;align-items:center;gap:10px;max-width:1320px;margin:16px auto -12px;padding:10px 16px;background:var(--yellow-bg);border:1px solid rgba(245,158,11,.25);border-radius:var(--radius-sm);color:var(--yellow);font-size:13px}
 .api-banner.show{display:flex}
+.api-banner.info{background:var(--accent-bg);border-color:rgba(124,58,237,.25);color:var(--accent-glow)}
 .api-banner svg{width:16px;height:16px;flex-shrink:0}
 @media(max-width:1368px){.api-banner{margin-left:24px;margin-right:24px}}
 
@@ -211,8 +212,9 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--accent-glow);outlin
   </div></nav>
 
   <div class="api-banner" id="api-banner">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-    <span>Can't reach the bot's data API &mdash; trading stats are unavailable. Market news still works.</span>
+    <svg id="banner-icon-warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    <svg id="banner-icon-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="display:none"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+    <span id="api-banner-text"></span>
   </div>
 
   <main class="main">
@@ -294,7 +296,7 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--accent-glow);outlin
 
     <!-- ===== NEWS ===== -->
     <div id="page-news" class="page">
-      <div class="section-header"><h2>Market News</h2><p>Latest headlines that could impact prediction markets. Updated every 15 minutes.</p></div>
+      <div class="section-header"><h2>Market News</h2><p>Latest headlines that could impact prediction markets.</p></div>
       <div class="filter-bar" id="news-filters">
         <button class="filter-btn active" data-cat="all">All</button>
         <button class="filter-btn" data-cat="Top Stories">Top Stories</button>
@@ -436,23 +438,59 @@ var equityChart, donutChart, winlossChart;
 // === MAIN REFRESH ===
 var DATA = {};
 
-function refresh() {
-  fetch('/api/data').then(function(r) {
-    if (!r.ok) throw new Error('API responded ' + r.status);
+function fetchJson(url) {
+  return fetch(url).then(function(r) {
+    if (!r.ok) throw new Error(url + ' responded ' + r.status);
     return r.json();
-  }).then(function(data) {
+  });
+}
+
+function setBanner(kind, text) {
+  var b = document.getElementById('api-banner');
+  if (!kind) { b.classList.remove('show'); return; }
+  b.classList.add('show');
+  b.classList.toggle('info', kind === 'info');
+  document.getElementById('banner-icon-warn').style.display = kind === 'info' ? 'none' : '';
+  document.getElementById('banner-icon-info').style.display = kind === 'info' ? '' : 'none';
+  document.getElementById('api-banner-text').textContent = text;
+}
+
+function renderAll() {
+  renderHome();
+  renderBets();
+  renderPositions();
+  renderCharts();
+}
+
+function refresh() {
+  fetchJson('/api/data').then(function(data) {
+    // Live mode — the bot's local server is running.
     DATA = data;
-    document.getElementById('api-banner').classList.remove('show');
-    renderHome();
-    renderBets();
-    renderPositions();
-    renderCharts();
+    setBanner(null);
+    renderAll();
     document.getElementById('last-update').textContent = 'Last sync: ' + new Date().toLocaleTimeString();
     resetCountdown();
-  }).catch(function(e) {
-    console.error('[BotTracker] Refresh error:', e);
-    document.getElementById('api-banner').classList.add('show');
-    document.getElementById('last-update').textContent = 'Last sync: unavailable';
+  }).catch(function() {
+    // No live API (e.g. GitHub Pages) — fall back to the published snapshot.
+    fetchJson('data.json?t=' + Date.now()).then(function(data) {
+      DATA = data;
+      if (data.news && data.news.length && !NEWS_DATA.length) {
+        NEWS_DATA = data.news;
+        newsFetched = true;
+        if (document.getElementById('page-news').classList.contains('active')) {
+          showNewsArticles(document.getElementById('news-container'));
+        }
+      }
+      var age = data.generated_at ? timeAgo(data.generated_at) : 'an unknown time';
+      setBanner('info', 'Showing a published snapshot from ' + age + '. Stats update whenever the bot publishes new data.');
+      renderAll();
+      document.getElementById('last-update').textContent = 'Snapshot: ' + (data.generated_at ? shortTime(data.generated_at) : '—');
+      resetCountdown();
+    }).catch(function(e) {
+      console.error('[BotTracker] No data source available:', e);
+      setBanner('warn', "Can't load trading data — neither the bot's API nor a published snapshot is reachable.");
+      document.getElementById('last-update').textContent = 'Last sync: unavailable';
+    });
   });
 }
 
@@ -605,31 +643,16 @@ function renderPositions() {
 }
 
 // === RENDER NEWS ===
+// Live mode uses the bot server's /api/news (Google News RSS, cached 15 min).
+// On GitHub Pages that endpoint doesn't exist, so news comes from the
+// published data.json snapshot instead.
 var NEWS_DATA = [];
 var newsFilter = 'all';
 var newsFetched = false;
 
-var NEWS_FEEDS = [
-  {cat: 'Top Stories', url: 'https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en'},
-  {cat: 'Business', url: 'https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx6TVdZU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en'},
-  {cat: 'Politics', url: 'https://news.google.com/rss/topics/CAAqIQgKIhtDQkFTRGdvSUwyMHZNRFZ4ZERBU0FtVnVLQUFQAQ?hl=en-US&gl=US&ceid=US:en'},
-  {cat: 'World', url: 'https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx1YlY4U0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en'},
-  {cat: 'Technology', url: 'https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGRqTVhZU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en'},
-  {cat: 'Sports', url: 'https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRFp1ZEdvU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en'}
-];
-
-function fetchOneFeed(feedObj) {
-  var apiUrl = 'https://api.rss2json.com/v1/api.json?rss_url=' + encodeURIComponent(feedObj.url);
-  return fetch(apiUrl).then(function(r) { return r.json(); }).then(function(data) {
-    if (data.status === 'ok' && data.items) {
-      return data.items.slice(0, 8).map(function(item) {
-        return {title: item.title, link: item.link, source: item.author || '', category: feedObj.cat, published: item.pubDate || ''};
-      });
-    }
-    return [];
-  }).catch(function(e) {
-    console.warn('[BotTracker] News fetch failed for ' + feedObj.cat, e);
-    return [];
+function loadNews() {
+  return fetchJson('/api/news').catch(function() {
+    return (DATA && DATA.news) ? DATA.news : [];
   });
 }
 
@@ -638,11 +661,8 @@ function renderNews() {
 
   if (!newsFetched) {
     container.innerHTML = '<div class="empty">Fetching latest news...</div>';
-    Promise.all(NEWS_FEEDS.map(fetchOneFeed)).then(function(results) {
-      var all = [];
-      results.forEach(function(arr) { all = all.concat(arr); });
-      all.sort(function(a, b) { return new Date(b.published) - new Date(a.published); });
-      NEWS_DATA = all;
+    loadNews().then(function(items) {
+      NEWS_DATA = items || [];
       newsFetched = true;
       showNewsArticles(container);
     });
