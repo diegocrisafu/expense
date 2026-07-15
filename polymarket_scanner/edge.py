@@ -283,6 +283,23 @@ def analyze_binary_market(
 # Convenience wrappers
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+def is_market_expired(market: dict) -> bool:
+    """Check if a market is closed/resolved or effectively dead.
+
+    Polymarket marks resolved markets as closed=True.
+    Also catches zombie markets trading at $0.005 or less.
+    """
+    if market.get("closed") is True:
+        return True
+    try:
+        ask = market.get("bestAsk")
+        if ask is not None and Decimal(str(ask)) <= Decimal("0.005"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def analyze_market_data(market: dict) -> Optional[MarketEdge]:
     """Analyze a market dict straight from the Gamma REST API.
 

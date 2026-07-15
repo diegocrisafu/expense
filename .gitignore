@@ -2,7 +2,7 @@
 roger.log
 *.log
 *.log.*
-.roger.pid
+*.pid
 __pycache__/
 *.pyc
 .pytest_cache/

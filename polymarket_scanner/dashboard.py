@@ -17,8 +17,12 @@ import json
 import logging
 import os
 import sqlite3
+import time
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from decimal import Decimal
+from email.utils import parsedate_to_datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 from typing import Optional
@@ -58,7 +62,7 @@ class DashboardData:
     def get_current_balance(self) -> Decimal:
         """Approximate balance from trade history."""
         row = self._safe_query_one("""
-            SELECT 
+            SELECT
                 COALESCE(SUM(CASE WHEN mode = 'PAPER' THEN CAST(profit AS FLOAT) ELSE 0 END), 0) as paper_profit,
                 COALESCE(SUM(CASE WHEN mode != 'PAPER' THEN CAST(profit AS FLOAT) ELSE 0 END), 0) as live_profit
             FROM trades
@@ -71,7 +75,7 @@ class DashboardData:
     def get_trade_summary(self) -> dict:
         """Overall trade statistics."""
         row = self._safe_query_one("""
-            SELECT 
+            SELECT
                 COUNT(*) as total_trades,
                 COALESCE(SUM(CAST(profit AS FLOAT)), 0) as total_profit,
                 COALESCE(SUM(CAST(size AS FLOAT)), 0) as total_volume,
@@ -87,8 +91,8 @@ class DashboardData:
     def get_recent_trades(self, limit: int = 20) -> list[dict]:
         """Last N trades."""
         return self._safe_query("""
-            SELECT timestamp, trade_type, market_or_token, 
-                   CAST(size AS FLOAT) as size, 
+            SELECT timestamp, trade_type, market_or_token,
+                   CAST(size AS FLOAT) as size,
                    CAST(profit AS FLOAT) as profit, mode
             FROM trades ORDER BY timestamp DESC LIMIT ?
         """, (limit,))
@@ -104,7 +108,7 @@ class DashboardData:
                    CAST(take_profit_price AS FLOAT) as tp,
                    CAST(stop_loss_price AS FLOAT) as sl,
                    opened_at,
-                   (CAST(current_price AS FLOAT) - CAST(entry_price AS FLOAT)) 
+                   (CAST(current_price AS FLOAT) - CAST(entry_price AS FLOAT))
                      * CAST(size AS FLOAT) as unrealized_pnl
             FROM managed_positions WHERE status = 'ACTIVE'
             ORDER BY opened_at DESC
@@ -151,7 +155,7 @@ class DashboardData:
     def get_today_pnl(self) -> dict:
         today = datetime.utcnow().strftime("%Y-%m-%d")
         row = self._safe_query_one("""
-            SELECT 
+            SELECT
                 COALESCE(SUM(CAST(exit_pnl AS FLOAT)), 0) as realized,
                 COUNT(*) as trades_closed
             FROM managed_positions
@@ -160,7 +164,7 @@ class DashboardData:
 
         active_row = self._safe_query_one("""
             SELECT COALESCE(SUM(
-                (CAST(current_price AS FLOAT) - CAST(entry_price AS FLOAT)) 
+                (CAST(current_price AS FLOAT) - CAST(entry_price AS FLOAT))
                 * CAST(size AS FLOAT)
             ), 0) as unrealized
             FROM managed_positions WHERE status = 'ACTIVE'
@@ -318,6 +322,65 @@ async def run_cli_dashboard(db_path: str = None, interval: int = 30):
 
 
 # =====================================================================
+# News Fetcher — Google News RSS (no API key needed)
+# =====================================================================
+_news_cache = {"data": [], "fetched_at": 0}
+NEWS_CACHE_TTL = 900  # 15 minutes
+
+GOOGLE_NEWS_FEEDS = {
+    "Top Stories": "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
+    "Business": "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx6TVdZU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en",
+    "Politics": "https://news.google.com/rss/topics/CAAqIQgKIhtDQkFTRGdvSUwyMHZNRFZ4ZERBU0FtVnVLQUFQAQ?hl=en-US&gl=US&ceid=US:en",
+    "World": "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx1YlY4U0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en",
+    "Technology": "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGRqTVhZU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en",
+    "Sports": "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRFp1ZEdvU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en",
+}
+
+
+def fetch_news(max_per_category: int = 6) -> list[dict]:
+    """Fetch news from Google News RSS feeds. Cached for 15 min."""
+    now = time.time()
+    if _news_cache["data"] and (now - _news_cache["fetched_at"]) < NEWS_CACHE_TTL:
+        return _news_cache["data"]
+
+    articles = []
+    for category, url in GOOGLE_NEWS_FEEDS.items():
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "BotTracker/1.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                xml_data = resp.read()
+            root = ET.fromstring(xml_data)
+            items = root.findall(".//item")[:max_per_category]
+            for item in items:
+                title = item.findtext("title", "")
+                link = item.findtext("link", "")
+                pub_date = item.findtext("pubDate", "")
+                source = item.findtext("source", "")
+                # Parse the date
+                iso_date = ""
+                if pub_date:
+                    try:
+                        iso_date = parsedate_to_datetime(pub_date).isoformat()
+                    except Exception:
+                        iso_date = pub_date
+                articles.append({
+                    "title": title,
+                    "link": link,
+                    "source": source,
+                    "category": category,
+                    "published": iso_date,
+                })
+        except Exception as e:
+            logger.debug(f"Failed to fetch {category} news: {e}")
+
+    # Sort by published date (newest first)
+    articles.sort(key=lambda a: a.get("published", ""), reverse=True)
+    _news_cache["data"] = articles
+    _news_cache["fetched_at"] = now
+    return articles
+
+
+# =====================================================================
 # Web Dashboard — "Roger the Polymarket Bot"
 # =====================================================================
 _roger_path = os.path.join(os.path.dirname(__file__), '..', 'roger.html')
@@ -363,6 +426,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps(history, default=str).encode())
+
+        elif self.path == "/api/news":
+            articles = fetch_news()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(articles, default=str).encode())
 
         else:
             self.send_response(404)
