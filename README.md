@@ -348,7 +348,7 @@ python3 analyze_losses.py
 
 The web dashboard runs locally at `http://localhost:8080` and is mirrored on [GitHub Pages](https://diegocrisafu.github.io/expense/):
 
-- **Dashboard** — balance, today's P&L, win rate, equity curve, strategy charts
+- **Dashboard** — balance, today's P&L, win rate, equity curve, strategy charts, a trading calendar (each day colored by that day's profit or loss), and average P&L by weekday
 - **Bets** — every bet with a plain-English explanation of why it was placed
 - **Positions** — open positions with live P&L and TP/SL targets, plus recent exits
 - **News** — market-moving headlines by category, refreshed every 15 minutes
@@ -356,10 +356,9 @@ The web dashboard runs locally at `http://localhost:8080` and is mirrored on [Gi
 Light/dark theme included. The page prefers the live local API; when that's unreachable (i.e. on GitHub Pages) it falls back to a published `data.json` snapshot and shows how old the data is. To refresh the public tracker:
 
 ```bash
-./publish_tracker.sh   # export data.json from the local DB, commit, push
+./publish_tracker.sh          # publish once, right now
+./setup_publish_schedule.sh   # one-time: auto-publish daily at 09:00 and 21:00 (macOS launchd)
 ```
-
-Schedule it (e.g. `0 */3 * * *` in cron) to keep the public page current.
 
 ## Database
 

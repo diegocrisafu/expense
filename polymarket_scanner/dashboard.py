@@ -28,7 +28,7 @@ from threading import Thread
 from typing import Optional
 
 from .database import get_connection, DB_PATH
-from .trading_config import STARTING_BALANCE, STOP_LOSS_THRESHOLD
+from .trading_config import STARTING_BALANCE, STOP_LOSS_THRESHOLD, CLEAN_DATA_SINCE
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +210,24 @@ class DashboardData:
             ORDER BY DATE(timestamp) ASC
         """)
 
+    def get_daily_pnl(self) -> list[dict]:
+        """Daily P&L aggregates for the trading calendar.
+
+        Only clean data (>= CLEAN_DATA_SINCE) — earlier history was recorded
+        by buggy accounting and is quarantined from all scorecards.
+        """
+        return self._safe_query("""
+            SELECT DATE(timestamp) as date,
+                   COALESCE(SUM(CAST(pnl AS FLOAT)), 0) as pnl,
+                   COUNT(*) as trades,
+                   COALESCE(SUM(CASE WHEN CAST(pnl AS FLOAT) > 0 THEN 1 ELSE 0 END), 0) as wins,
+                   COALESCE(SUM(CASE WHEN CAST(pnl AS FLOAT) < 0 THEN 1 ELSE 0 END), 0) as losses
+            FROM trade_history
+            WHERE DATE(timestamp) >= ?
+            GROUP BY DATE(timestamp)
+            ORDER BY DATE(timestamp) ASC
+        """, (CLEAN_DATA_SINCE,))
+
     # --- Full snapshot for web dashboard ---
     def get_full_snapshot(self) -> dict:
         """Everything the dashboard needs in one shot."""
@@ -228,6 +246,8 @@ class DashboardData:
             "recent_trades": self.get_recent_trades(20),
             "trade_history": self.get_trade_history(50),
             "all_bets": self.get_all_bets(100),
+            "daily_pnl": self.get_daily_pnl(),
+            "clean_since": CLEAN_DATA_SINCE,
         }
 
 
