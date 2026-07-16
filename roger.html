@@ -29,6 +29,7 @@
   --radius:16px;--radius-sm:10px;
   --transition:all .25s cubic-bezier(.4,0,.2,1);
   --nav-bg:rgba(6,6,10,.8);--chart-grid:rgba(99,102,241,.06);--chart-text:#6b7280;
+  --cal-gain:#0da271;--cal-loss:#f43f5e;
 }
 [data-theme="light"]{
   --bg:#f4f2f7;--bg-card:rgba(255,255,255,.85);--bg-hover:#ede9f5;--border:rgba(124,58,237,.12);
@@ -41,6 +42,7 @@
   --purple:#7e22ce;--purple-bg:rgba(126,34,206,.08);
   --orange:#ea580c;--orange-bg:rgba(234,88,12,.08);
   --nav-bg:rgba(244,242,247,.85);--chart-grid:rgba(124,58,237,.06);--chart-text:#8e89a3;
+  --cal-gain:#059669;--cal-loss:#e11d48;
 }
 html{scroll-behavior:smooth}
 body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh;-webkit-font-smoothing:antialiased}
@@ -155,6 +157,26 @@ tbody tr:hover{background:var(--bg-hover)}
 /* CARD TITLE ICONS */
 .card-title svg{width:14px;height:14px;stroke:var(--accent-glow);flex-shrink:0}
 
+/* TRADING CALENDAR */
+.cal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.cal-title{font-size:14px;font-weight:700}
+.cal-nav-btn{background:var(--glass);border:1px solid var(--border);color:var(--text-muted);width:28px;height:28px;border-radius:8px;cursor:pointer;font-size:16px;line-height:1;transition:var(--transition);display:flex;align-items:center;justify-content:center}
+.cal-nav-btn:hover:not(:disabled){background:var(--accent-bg);color:var(--accent-glow)}
+.cal-nav-btn:disabled{opacity:.3;cursor:default}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.cal-dow{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text-dim);text-align:center;padding:2px 0}
+.cal-cell{aspect-ratio:1;border-radius:8px;background:var(--glass);position:relative;display:flex;align-items:center;justify-content:center;transition:background .2s ease,box-shadow .2s ease}
+.cal-cell.blank{background:transparent}
+.cal-cell .d{position:absolute;top:3px;left:5px;font-size:9px;color:var(--text-dim)}
+.cal-cell .v{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:10px;margin-top:6px}
+.cal-cell.has-trades:hover{box-shadow:inset 0 0 0 2px var(--accent-glow)}
+.cal-cell.today{box-shadow:inset 0 0 0 1px var(--accent-glow)}
+@media(max-width:900px){.cal-cell .v{font-size:9px}}
+.cal-legend{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--text-dim);margin-top:12px;justify-content:flex-end}
+.cal-swatch{width:12px;height:12px;border-radius:3px}
+.cal-tip{position:fixed;z-index:300;background:var(--bg-card);backdrop-filter:blur(12px);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 12px;font-size:12px;line-height:1.5;pointer-events:none;display:none;box-shadow:0 8px 24px rgba(0,0,0,.25);max-width:220px}
+.cal-tip .tip-date{font-weight:700;margin-bottom:2px}
+
 /* STATUS BANNER (snapshot info / offline warning) */
 .api-banner{display:none;align-items:center;gap:10px;max-width:1320px;margin:16px auto -12px;padding:10px 16px;background:var(--yellow-bg);border:1px solid rgba(245,158,11,.25);border-radius:var(--radius-sm);color:var(--yellow);font-size:13px}
 .api-banner.show{display:flex}
@@ -253,6 +275,32 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--accent-glow);outlin
         </div>
       </div>
 
+      <!-- TRADING CALENDAR -->
+      <div class="two-col">
+        <div class="card">
+          <div class="card-title"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> Trading Calendar</div>
+          <div class="card-explain">Each day is colored by that day's profit or loss &mdash; the stronger the color, the bigger the move. Hover a day for details.</div>
+          <div class="cal-head">
+            <button class="cal-nav-btn" id="cal-prev" aria-label="Previous month">&lsaquo;</button>
+            <div class="cal-title" id="cal-title">&mdash;</div>
+            <button class="cal-nav-btn" id="cal-next" aria-label="Next month">&rsaquo;</button>
+          </div>
+          <div class="cal-grid" id="cal-grid"></div>
+          <div class="cal-legend" id="cal-legend">
+            <span>Loss</span>
+            <span class="cal-swatch" data-alpha="-0.9"></span><span class="cal-swatch" data-alpha="-0.5"></span><span class="cal-swatch" data-alpha="-0.2"></span><span class="cal-swatch" data-alpha="0"></span><span class="cal-swatch" data-alpha="0.2"></span><span class="cal-swatch" data-alpha="0.5"></span><span class="cal-swatch" data-alpha="0.9"></span>
+            <span>Profit</span>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg> Best Days to Trade</div>
+          <div class="card-explain">Average daily P&amp;L for each weekday, from clean trade data. Fills in as the bot builds history.</div>
+          <div class="big-num" id="wk-best" style="font-size:22px">&mdash;</div>
+          <div class="sub-text" id="wk-best-detail" style="margin-bottom:14px"></div>
+          <div class="chart-wrap" style="height:200px"><canvas id="chart-weekday"></canvas></div>
+        </div>
+      </div>
+
       <!-- RECENT ACTIVITY -->
       <div class="card">
         <div class="card-title"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Recent Activity</div>
@@ -309,6 +357,8 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--accent-glow);outlin
       <div id="news-container"><div class="empty">Loading news...</div></div>
     </div>
   </main>
+
+  <div class="cal-tip" id="cal-tip"></div>
 
   <div class="footer">
     <span id="last-update" style="margin-right:16px">Last sync: &mdash;</span>
@@ -372,7 +422,7 @@ function esc(s) {
 
 function fmt(n, sign) {
   if (n == null || isNaN(n)) return '\u2014';
-  var s = sign && n >= 0 ? '+' : '';
+  var s = n < 0 ? '\u2212' : (sign ? '+' : '');
   return s + '$' + Math.abs(Number(n)).toFixed(2);
 }
 
@@ -574,6 +624,188 @@ function renderCharts() {
   var wlCtx = document.getElementById('chart-winloss');
   if (winlossChart) winlossChart.destroy();
   winlossChart = new Chart(wlCtx, {type:'bar',data:{labels:strats.map(function(s){return s.strategy}),datasets:[{label:'Wins',data:strats.map(function(s){return s.wins||0}),backgroundColor:'rgba(16,185,129,.7)',borderRadius:4},{label:'Losses',data:strats.map(function(s){return s.losses||0}),backgroundColor:'rgba(244,63,94,.7)',borderRadius:4}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:tc.legendText,font:{size:11}}}},scales:{x:{ticks:{color:tc.text,font:{size:10}},grid:{display:false}},y:{ticks:{color:tc.text,font:{size:10},stepSize:1},grid:{color:tc.grid}}}}});
+
+  renderCalendar();
+  renderWeekdays();
+}
+
+// === TRADING CALENDAR ===
+var calMonth = null;  // {y, m} of the month being displayed
+
+function hexToRgbStr(hex) {
+  hex = hex.replace('#', '').trim();
+  if (hex.length === 3) hex = hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2];
+  var n = parseInt(hex, 16);
+  return ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255);
+}
+
+function calPoles() {
+  var s = getComputedStyle(document.documentElement);
+  return {
+    gain: hexToRgbStr(s.getPropertyValue('--cal-gain') || '#0da271'),
+    loss: hexToRgbStr(s.getPropertyValue('--cal-loss') || '#f43f5e')
+  };
+}
+
+function dailyMap() {
+  var m = {};
+  (DATA.daily_pnl || []).forEach(function(r) { m[r.date] = r; });
+  return m;
+}
+
+function monthKey(y, m) { return y * 12 + m; }
+
+function calBounds() {
+  var rows = DATA.daily_pnl || [];
+  var now = new Date();
+  var max = {y: now.getFullYear(), m: now.getMonth()};
+  var min = max;
+  if (rows.length) {
+    var first = new Date(rows[0].date + 'T12:00:00');
+    min = {y: first.getFullYear(), m: first.getMonth()};
+  }
+  return {min: min, max: max};
+}
+
+function renderCalendar() {
+  var grid = document.getElementById('cal-grid');
+  var rows = DATA.daily_pnl || [];
+  var bounds = calBounds();
+  if (!calMonth) calMonth = {y: bounds.max.y, m: bounds.max.m};
+  if (monthKey(calMonth.y, calMonth.m) < monthKey(bounds.min.y, bounds.min.m)) calMonth = {y: bounds.min.y, m: bounds.min.m};
+  if (monthKey(calMonth.y, calMonth.m) > monthKey(bounds.max.y, bounds.max.m)) calMonth = {y: bounds.max.y, m: bounds.max.m};
+
+  document.getElementById('cal-prev').disabled = monthKey(calMonth.y, calMonth.m) <= monthKey(bounds.min.y, bounds.min.m);
+  document.getElementById('cal-next').disabled = monthKey(calMonth.y, calMonth.m) >= monthKey(bounds.max.y, bounds.max.m);
+  document.getElementById('cal-title').textContent = new Date(calMonth.y, calMonth.m, 1).toLocaleString('en-US', {month:'long', year:'numeric'});
+
+  if (!rows.length) {
+    grid.innerHTML = '<div class="empty" style="grid-column:1/-1;padding:24px">No clean trade data yet — the calendar fills in as the bot trades.</div>';
+    return;
+  }
+
+  var map = dailyMap();
+  var poles = calPoles();
+
+  // Intensity is scaled to this month's biggest daily move
+  var maxAbs = 0;
+  rows.forEach(function(r) {
+    var d = new Date(r.date + 'T12:00:00');
+    if (d.getFullYear() === calMonth.y && d.getMonth() === calMonth.m) maxAbs = Math.max(maxAbs, Math.abs(r.pnl));
+  });
+
+  var html = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(function(d) { return '<div class="cal-dow">' + d + '</div>'; }).join('');
+  var firstDow = (new Date(calMonth.y, calMonth.m, 1).getDay() + 6) % 7;  // Monday-first
+  var daysInMonth = new Date(calMonth.y, calMonth.m + 1, 0).getDate();
+  for (var i = 0; i < firstDow; i++) html += '<div class="cal-cell blank"></div>';
+
+  var today = new Date();
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  for (var day = 1; day <= daysInMonth; day++) {
+    var key = calMonth.y + '-' + pad(calMonth.m + 1) + '-' + pad(day);
+    var r = map[key];
+    var isToday = today.getFullYear() === calMonth.y && today.getMonth() === calMonth.m && today.getDate() === day;
+    var cls2 = 'cal-cell' + (r ? ' has-trades' : '') + (isToday ? ' today' : '');
+    var style = '', val = '';
+    if (r && r.trades > 0) {
+      var alpha = maxAbs > 0 ? 0.15 + 0.7 * (Math.abs(r.pnl) / maxAbs) : 0.15;
+      var pole = r.pnl >= 0 ? poles.gain : poles.loss;
+      style = ' style="background:rgba(' + pole + ',' + alpha.toFixed(2) + ')"';
+      var a = Math.abs(r.pnl);
+      var num = a >= 100 ? a.toFixed(0) : a >= 10 ? a.toFixed(1) : a.toFixed(2);
+      val = '<span class="v"' + (alpha > 0.55 ? ' style="color:#fff"' : '') + '>' + (r.pnl >= 0 ? '+' : '−') + '$' + num + '</span>';
+    }
+    html += '<div class="' + cls2 + '"' + style + ' data-date="' + key + '"><span class="d">' + day + '</span>' + val + '</div>';
+  }
+  grid.innerHTML = html;
+
+  document.querySelectorAll('#cal-legend .cal-swatch').forEach(function(sw) {
+    var a = parseFloat(sw.dataset.alpha);
+    if (a === 0) {
+      sw.style.background = 'var(--glass)';
+      sw.style.border = '1px solid var(--border)';
+    } else {
+      sw.style.background = 'rgba(' + (a > 0 ? poles.gain : poles.loss) + ',' + (0.15 + 0.7 * Math.abs(a)).toFixed(2) + ')';
+    }
+  });
+}
+
+var calTip = document.getElementById('cal-tip');
+
+document.getElementById('cal-grid').addEventListener('mousemove', function(e) {
+  var cell = e.target.closest('.cal-cell');
+  if (!cell || !cell.dataset.date) { calTip.style.display = 'none'; return; }
+  var r = dailyMap()[cell.dataset.date];
+  var pretty = new Date(cell.dataset.date + 'T12:00:00').toLocaleDateString('en-US', {weekday:'long', month:'short', day:'numeric'});
+  var body = r
+    ? '<span class="' + cls(r.pnl) + '" style="font-weight:700">' + fmt(r.pnl, true) + '</span> · ' + r.trades + ' trade' + (r.trades === 1 ? '' : 's') + ' (' + r.wins + 'W/' + r.losses + 'L)'
+    : '<span style="color:var(--text-dim)">No trades</span>';
+  calTip.innerHTML = '<div class="tip-date">' + pretty + '</div>' + body;
+  calTip.style.display = 'block';
+  var x = e.clientX + 14, y = e.clientY + 14;
+  if (x + 230 > window.innerWidth) x = e.clientX - 234;
+  if (y + 80 > window.innerHeight) y = e.clientY - 90;
+  calTip.style.left = x + 'px';
+  calTip.style.top = y + 'px';
+});
+
+document.getElementById('cal-grid').addEventListener('mouseleave', function() { calTip.style.display = 'none'; });
+
+document.getElementById('cal-prev').addEventListener('click', function() {
+  calMonth.m--; if (calMonth.m < 0) { calMonth.m = 11; calMonth.y--; }
+  renderCalendar();
+});
+document.getElementById('cal-next').addEventListener('click', function() {
+  calMonth.m++; if (calMonth.m > 11) { calMonth.m = 0; calMonth.y++; }
+  renderCalendar();
+});
+
+// === BEST DAYS TO TRADE ===
+var weekdayChart;
+
+function renderWeekdays() {
+  var rows = DATA.daily_pnl || [];
+  var tc = getThemeColors();
+  var poles = calPoles();
+  var days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  var sums = [0,0,0,0,0,0,0], counts = [0,0,0,0,0,0,0], tradeTotals = [0,0,0,0,0,0,0];
+  rows.forEach(function(r) {
+    var idx = (new Date(r.date + 'T12:00:00').getDay() + 6) % 7;
+    sums[idx] += Number(r.pnl) || 0;
+    counts[idx]++;
+    tradeTotals[idx] += r.trades || 0;
+  });
+  var avgs = sums.map(function(s, i) { return counts[i] ? s / counts[i] : 0; });
+
+  var bestIdx = -1, bestVal = -Infinity;
+  avgs.forEach(function(v, i) { if (counts[i] && v > bestVal) { bestVal = v; bestIdx = i; } });
+  var bestEl = document.getElementById('wk-best');
+  var detEl = document.getElementById('wk-best-detail');
+  if (bestIdx >= 0) {
+    var full = ['Mondays','Tuesdays','Wednesdays','Thursdays','Fridays','Saturdays','Sundays'][bestIdx];
+    bestEl.textContent = full + ': ' + fmt(bestVal, true) + ' avg';
+    bestEl.className = 'big-num ' + cls(bestVal);
+    bestEl.style.fontSize = '22px';
+    detEl.textContent = 'Best weekday so far · based on ' + counts[bestIdx] + ' trading day' + (counts[bestIdx] === 1 ? '' : 's');
+  } else {
+    bestEl.textContent = '—';
+    detEl.textContent = 'No clean trade data yet';
+  }
+
+  var colors = avgs.map(function(v) { return 'rgba(' + (v >= 0 ? poles.gain : poles.loss) + ',.85)'; });
+  var ctx = document.getElementById('chart-weekday');
+  if (weekdayChart) weekdayChart.destroy();
+  weekdayChart = new Chart(ctx, {type:'bar',
+    data:{labels:days,datasets:[{label:'Avg daily P&L',data:avgs,backgroundColor:colors,borderRadius:4,barPercentage:.55,categoryPercentage:.7}]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{
+        label:function(c) {
+          var i = c.dataIndex;
+          return counts[i] ? fmt(avgs[i], true) + ' avg · ' + counts[i] + ' day' + (counts[i] === 1 ? '' : 's') + ' · ' + tradeTotals[i] + ' trades' : 'No data yet';
+        }
+      }}},
+      scales:{x:{ticks:{color:tc.text,font:{size:10}},grid:{display:false}},
+              y:{ticks:{callback:function(v){return (v < 0 ? '−' : '') + '$' + Math.abs(v).toFixed(2)},color:tc.text,font:{size:10}},grid:{color:tc.grid}}}}});
 }
 
 // === RENDER BETS ===
