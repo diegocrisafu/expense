@@ -38,6 +38,7 @@ from .smart_exit import (
     SmartExitVerdict,
     evaluate_position,
 )
+from .resolution import fetch_market_resolution
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,16 @@ class PositionManager:
     # If bid stays below this fraction of entry for this many hours, consider dead
     DEAD_MARKET_BID_RATIO = Decimal("0.01")  # bid < 1% of entry
     DEAD_MARKET_HOURS = 24  # must be dead for 24h
+    # A managed sell at a bid this high almost always means the market is
+    # RESOLVING, not that we can round-trip near $1.  Above it we verify the
+    # actual on-chain resolution and settle the token we hold at its TRUE value
+    # ($0 or $1) instead of trusting a phantom orderbook bid.  This is what
+    # prevents booking a losing longshot (e.g. "Switzerland win the World Cup"
+    # bought at 2c) as a 99.9c jackpot.
+    RESOLVING_BID_GUARD = Decimal("0.90")
+    # If the bid is this high but we CANNOT confirm resolution, refuse to book a
+    # fill this cycle — wait for a confirmable outcome rather than trust it.
+    UNTRUSTED_BID_CEILING = Decimal("0.97")
 
     def __init__(self, executor=None, db_path: str = None):
         self.db_path = db_path or DB_PATH
@@ -469,6 +480,22 @@ class PositionManager:
             edge_at_entry=entry_edge,
         )
 
+    async def _settle_if_resolved(self, pos: "ManagedPosition") -> Optional[Decimal]:
+        """If pos's market has resolved, return the settled price ($0/$1) of the
+        token we HOLD; otherwise None.
+
+        This is the authoritative outcome — it lets the exit path book a losing
+        longshot as a loss instead of trusting a phantom near-$1 orderbook bid.
+        """
+        try:
+            res = await fetch_market_resolution(pos.market_id)
+        except Exception as e:
+            logger.debug(f"Resolution check failed for {pos.market_id[:16]}: {e}")
+            return None
+        if not res or not res.get("resolved"):
+            return None
+        return res.get("settlement_by_token", {}).get(str(pos.token_id))
+
     # ------------------------------------------------------------------
     # Core exit-check logic
     # ------------------------------------------------------------------
@@ -536,6 +563,30 @@ class PositionManager:
 
             # ═══ PASS 1: Fixed exit conditions (fast, no extra API calls) ═══
             fixed_exit = False
+
+            # 0) RESOLUTION GUARD (runs before take-profit).
+            #    A bid near $1 almost always means the market RESOLVED rather
+            #    than that we can sell near $1.  Confirm the on-chain outcome and
+            #    settle the token we hold at its TRUE value, so a longshot that
+            #    actually lost is booked as a loss — not a phantom jackpot.
+            if bid_price >= self.RESOLVING_BID_GUARD:
+                settled = await self._settle_if_resolved(pos)
+                if settled is not None:
+                    pnl = (settled - pos.entry_price) * pos.size
+                    won = settled > Decimal("0.5")
+                    logger.info(
+                        f"Market resolved: {pos.market_question[:40]} — token settled "
+                        f"${settled:.3f} ({'WON' if won else 'LOST'}), PnL ${pnl:.2f}"
+                    )
+                    self._close_position(pos.position_id, "MARKET_RESOLVED", settled, pnl)
+                    continue
+                # Resolution unconfirmed: refuse to trust an implausibly high bid.
+                if bid_price >= self.UNTRUSTED_BID_CEILING:
+                    logger.warning(
+                        f"Skipping unconfirmed ${bid_price:.3f} bid (no resolution): "
+                        f"{pos.market_question[:40]}"
+                    )
+                    continue
 
             # 1) TAKE PROFIT
             if not bid_too_low and bid_price >= pos.take_profit_price and bid_price > pos.entry_price:

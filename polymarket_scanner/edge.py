@@ -12,9 +12,9 @@ CORE INSIGHT (the user's question):
     Spread  = $0.02  (the market's "vig")
 
     Raw midpoint   = 0.85  (halfway between ask and bid)
-    Calibrated     = 0.84  (markets over-price favorites by ~3%)
-    True YES prob  ≈ 0.84
-    True NO  prob  ≈ 0.16
+    Calibrated     = 0.86  (favourites are under-priced → nudge up, not down)
+    True YES prob  ≈ 0.86
+    True NO  prob  ≈ 0.14
 
     YES edge = 0.84 - 0.86 = -0.02  (NEGATIVE — you'd overpay)
     NO  edge = 0.16 - 0.16 =  0.00  (break-even)
@@ -42,6 +42,7 @@ Complexity: O(1) per market, O(n) per event.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
@@ -56,10 +57,23 @@ logger = logging.getLogger(__name__)
 # 3% allows more opportunities through while still filtering noise.
 MIN_EDGE = Decimal("0.03")
 
-# Favorite-longshot shrinkage.  Markets systematically
-# over-price favourites and under-price longshots.
-# 3 % linear shrinkage toward 50 % corrects this.
-CALIBRATION_SHRINK = Decimal("0.03")
+# Favourite-longshot bias correction (log-odds steepening factor).
+#
+# Prediction markets systematically OVER-price longshots and UNDER-price
+# favourites — the classic favourite-longshot bias.  So the honest estimate of
+# the true probability is *more* extreme than the quoted price, not less:
+#   a 5% longshot resolves YES less than 5% of the time,
+#   a 95% favourite resolves YES more than 95% of the time.
+#
+# This is confirmed by the bot's own resolved trades: the cheap longshots it
+# bought (1-23c) resolved to $0 far more often than their price implied.  An
+# earlier version of this file shrank prices *toward* 0.50, which did the exact
+# opposite — it inflated longshot estimates and manufactured phantom edge on the
+# trades that went on to lose.  We now steepen the log-odds instead.
+#
+# 0.0 leaves prices untouched; 0.10 is a mild, well-behaved correction
+# (5% -> ~3.8%, 95% -> ~96.2%).  50/50 markets are left unchanged.
+FLB_STEEPEN = Decimal("0.10")
 
 # Maximum spread for swing/scalp trades.
 # Raised from 4% to 6% — allows more scalp opportunities.
@@ -139,16 +153,27 @@ class EventEdge:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def calibrate_probability(raw_prob: Decimal) -> Decimal:
-    """Pull extreme probabilities toward 50 %.
+    """Correct a market-implied probability for favourite-longshot bias.
 
-    Prediction markets over-price favourites:
-      99 % market → resolves YES ~97 % of the time
-       1 % market → resolves YES  ~3 % of the time
-      50 % market → well-calibrated
+    Prediction markets over-price longshots and under-price favourites, so the
+    true probability is *more* extreme than the quoted midpoint:
+      95 % market → resolves YES ~96 % of the time
+       5 % market → resolves YES  ~4 % of the time
+      50 % market → well-calibrated (left unchanged)
 
-    We apply a 3 % linear shrinkage toward 0.50.
+    We steepen the log-odds by ``FLB_STEEPEN``.  Working on the log-odds scale
+    keeps the result a valid probability, is symmetric around 0.50, and pushes
+    extremes further out rather than the (backwards) shrink-toward-0.50 this
+    function used to do.  See ``FLB_STEEPEN`` for the empirical justification.
     """
-    return raw_prob * (_ONE - CALIBRATION_SHRINK) + _HALF * CALIBRATION_SHRINK
+    if FLB_STEEPEN == _ZERO:
+        return raw_prob
+    p = float(raw_prob)
+    # Guard the open interval (0, 1); the logit diverges at the endpoints.
+    p = min(max(p, 1e-9), 1.0 - 1e-9)
+    logit = math.log(p / (1.0 - p)) * (1.0 + float(FLB_STEEPEN))
+    adjusted = 1.0 / (1.0 + math.exp(-logit))
+    return max(Decimal("0.005"), min(Decimal("0.995"), Decimal(str(adjusted))))
 
 
 def estimate_true_prob(
@@ -171,7 +196,13 @@ def estimate_true_prob(
     if momentum and momentum != _ZERO:
         # Volume-weight the momentum signal (high vol = more reliable)
         vol_factor = min(_ONE, (volume_24h or _ZERO) / Decimal("20000"))
-        shift = momentum * Decimal("0.25") * vol_factor
+        # Damp momentum near the extremes.  A one-hour price wiggle on a 5%
+        # longshot is mostly noise, so its information content collapses as the
+        # price approaches 0 or 1.  4·p·(1−p) peaks at 1.0 for a 50/50 market
+        # and falls toward 0 at the ends — this stops momentum from fabricating
+        # edge on the cheap longshots that historically resolved to zero.
+        extremity = Decimal("4") * p * (_ONE - p)
+        shift = momentum * Decimal("0.25") * vol_factor * extremity
         # Cap shift to ±5 %
         shift = max(Decimal("-0.05"), min(Decimal("0.05"), shift))
         p += shift
@@ -300,11 +331,20 @@ def is_market_expired(market: dict) -> bool:
     return False
 
 
-def analyze_market_data(market: dict) -> Optional[MarketEdge]:
+def analyze_market_data(
+    market: dict,
+    external_prob: Optional[Decimal] = None,
+) -> Optional[MarketEdge]:
     """Analyze a market dict straight from the Gamma REST API.
 
     Extracts bestAsk, bestBid, oneHourPriceChange, volume24hr
     and runs full edge analysis.  Returns None for invalid data.
+
+    Args:
+        external_prob: An INDEPENDENT probability estimate (e.g. from
+            information.py).  When supplied it overrides the market-derived
+            true-probability estimate, so the edge reflects real outside
+            information rather than the market's own reflection.
     """
     best_ask = market.get("bestAsk")
     best_bid = market.get("bestBid")
@@ -336,7 +376,9 @@ def analyze_market_data(market: dict) -> Optional[MarketEdge]:
     except Exception:
         pass
 
-    return analyze_binary_market(yes_ask, yes_bid, momentum, volume_24h)
+    return analyze_binary_market(
+        yes_ask, yes_bid, momentum, volume_24h, external_prob=external_prob,
+    )
 
 
 def validate_proposed_side(

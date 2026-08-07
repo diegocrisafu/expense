@@ -82,20 +82,21 @@ class TestRiskManager:
         """Per-trade size is capped at 5% of balance."""
         mgr = self._make_manager()
         allowed, size, reason = mgr.check_trade(
-            "MOMENTUM", Decimal("10.00"), Decimal("20.00")
+            "MOMENTUM", Decimal("10.00"), Decimal("100.00")
         )
         assert allowed is True
-        # 5% of $20 = $1.00; trade should be capped at or below that
-        assert size <= Decimal("1.00")
+        # 5% of $100 = $5.00; trade should be capped at or below that
+        assert size <= Decimal("5.00")
 
     @patch.object(RiskManager, "get_deployed_by_strategy")
     def test_blocks_when_max_positions_reached(self, mock_deployed):
         """Trade blocked when strategy has max open positions."""
-        # MOMENTUM allows max 3 positions
+        # MOMENTUM allows max 3 positions.  Use an ample balance so the block is
+        # the position count, not budget/available-capital.
         mock_deployed.return_value = (Decimal("3.00"), 3)
         mgr = self._make_manager()
         allowed, size, reason = mgr.check_trade(
-            "MOMENTUM", Decimal("1.00"), Decimal("25.00")
+            "MOMENTUM", Decimal("1.00"), Decimal("100.00")
         )
         assert allowed is False
         assert "max positions" in reason
@@ -128,10 +129,10 @@ class TestRiskManager:
     def test_rejects_tiny_trade(self, mock_deployed):
         """Trade too small after risk limits is rejected (< $0.10)."""
         mgr = self._make_manager()
-        # Balance just above reserve ($5.05 available = $0.05)
-        # 5% of $5.05 = $0.25, but ARB allocation is 5% × $0.05 = $0.00
+        # Balance just above the reserve ($20.05 → $0.05 available), so the
+        # ARB allocation rounds down to a sub-cent trade that gets rejected.
         allowed, size, reason = mgr.check_trade(
-            "ARB", Decimal("1.00"), Decimal("5.05")
+            "ARB", Decimal("1.00"), Decimal("20.05")
         )
         assert allowed is False
         assert "too small" in reason.lower() or "budget exhausted" in reason.lower()

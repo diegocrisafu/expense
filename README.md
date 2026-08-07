@@ -52,7 +52,7 @@ pie title Capital Allocation by Strategy
 
 Every strategy is capped at **5% of the current balance per trade** — no exceptions (see Risk Rules below).
 
-There is also a **Value Hunter** mode inside the momentum strategy: it buys "lottery tickets" — outcomes priced under $0.15 with confirmed edge and real volume. Risk a nickel to maybe win 95¢; historically, all of the bot's biggest winners were cheap entries like these.
+There is also a **Value Hunter** mode inside the momentum strategy: it looks for cheap "lottery tickets" — outcomes priced under $0.15 with confirmed edge and real volume. Risk a nickel to maybe win 95¢. **Important caveat:** cheap outcomes are *not* automatically good bets. Prediction markets exhibit a well-documented **favourite-longshot bias** — longshots are systematically over-priced and resolve to $0 more often than their price implies. The edge engine (`edge.py`) corrects for this by nudging the true-probability estimate of longshots *down*, not up, so a cheap ticket only clears the edge gate when it is genuinely mispriced. A cheap price on its own earns no bonus.
 
 ---
 
@@ -61,20 +61,28 @@ There is also a **Value Hunter** mode inside the momentum strategy: it buys "lot
 These are enforced in code (`risk_manager.py` asserts them at import) and cannot be bypassed by any strategy:
 
 ```
-$25.00 Starting Balance
-├── $5.00   Reserve — bot stops entirely if balance falls below this
-├── 5%      Max cost per trade (= $1.25 on a $25 balance, recomputed live)
-├── $6.25   MOMENTUM budget (25%)
-├── $6.25   CORRELATED budget (25%)
-├── $5.00   SWING budget (20%)
-├── $3.75   CONTRARIAN budget (15%)
-└── $3.75   ARB budget (15%)
+$100.00 Starting Balance
+├── $20.00  Reserve (20%) — kept out of trading; deployable = balance − reserve
+├── $80.00  Circuit breaker — bot HALTS entirely if balance draws down to here
+│            (a 20% loss). Reserve and halt are separate: at any balance the
+│            halt protects ~80% of capital, instead of the old fixed $5 floor
+│            that would have let a $100 balance bleed to $5 before stopping.
+├── 5%      Max cost per trade (= $5.00 on a $100 balance, recomputed live)
+├── $20.00  MOMENTUM budget (25% of deployable)
+├── $20.00  CORRELATED budget (25%)
+├── $16.00  SWING budget (20%)
+├── $12.00  CONTRARIAN budget (15%)
+└── $12.00  ARB budget (15%)
 
 Max positions: 15 open across all strategies
 Max trades:    12 per hour
 Share floor:   Polymarket requires 5 shares/order — if that minimum would
                push a trade over the 5% cap, the trade is REJECTED, not inflated.
 ```
+
+All of these scale with the balance: `RESERVE_FRACTION`, `MAX_DRAWDOWN_FRACTION`,
+and `MAX_TRADE_FRACTION` in `trading_config.py` are the single source of truth,
+so raising or lowering the account never leaves a stale absolute dollar limit.
 
 ### The Cost-Edge Gate
 
@@ -374,12 +382,31 @@ All state is stored in `polymarket_scanner.db` (SQLite):
 | `trade_features` | Feature vectors for every trade (offline analysis) |
 | `snapshots` / `orderbook_levels` | Market data capture for offline backtesting |
 
-## Performance & Data Quality
+## Performance & Data Quality — read this before trusting any number
 
-**All trade history before 2026-07-03 is quarantined.** A ledger audit found the old accounting was broken — placeholder exit prices invented take-profits that never happened, and three uncoordinated ledgers double-counted positions. Headline numbers from that era (e.g. "86% win rate") are not real and are excluded from every scorecard by `CLEAN_DATA_SINCE`.
+A full audit of the trade ledger found the reported track record was **fabricated by placeholder exit prices**. Every single winning trade in the database exited at exactly `0.5`, `0.99`, or `0.999` — none exited at a real market price. Those are internal placeholders, not fills:
 
-Since the fix, the bot has been re-accumulating **clean paper-trading data** with honest cost accounting (fees + slippage included). `metrics.py` computes the standard quant scorecard — win rate, profit factor, expectancy, max drawdown — from clean data only, and that scorecard is the gate for any future real-money allocation.
+- **`0.5`** — an old default (pre-2026-07-03, quarantined by `CLEAN_DATA_SINCE`).
+- **`0.99` / `0.999`** — the take-profit path trusting a near-$1 orderbook **bid** on a market that had actually *resolved*, and booking it as a win. This one **kept happening after the cutoff** (e.g. "Switzerland win the 2026 World Cup", bought at 2¢, "sold" at 99.9¢ on 2026-07-09).
+
+Counting only trades that closed at genuine market prices, the honest record is **0 verifiable wins and roughly −$46**. The headline "+$211 / 29% win rate" was ~127% placeholder profit. The bot got lucky-looking on paper; it never actually had an edge.
+
+**What was fixed** (`resolution.py`, `position_manager.py`): resolved markets are now settled at the **true on-chain outcome of the token we hold** ($0 or $1), and the exit path refuses to book a near-$1 bid as profit without confirming the market really resolved in our favour. So the scorecard is honest going forward. `metrics.py` computes win rate / profit factor / expectancy / max drawdown from clean data only, and that is the gate for any real-money allocation.
+
+## The Information Edge — the only path to real profit (experimental, off by default)
+
+The edge engine can only ever reprice the market's own quotes, so on its own the bot has **no independent information** and, after costs, no real edge. `information.py` fills the dormant `external_prob` hook: it pulls targeted news for a specific market, asks an LLM for a calibrated probability, and lets the bot bet **only when that independent estimate diverges from the market price by more than trading costs**. It gates the value-hunter path — a cheap longshot must be *confirmed* underpriced by outside information, not bought just for being cheap.
+
+This is a **mechanism, not a proven money-maker.** It stays completely inert unless you set `INFO_EDGE_ENABLED=1`, provide `ANTHROPIC_API_KEY`, and `pip install anthropic`. Validate it in paper mode across many *resolved* markets before trusting it with a dollar.
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
+Made by Diego Crisafulli.

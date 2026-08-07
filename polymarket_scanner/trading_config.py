@@ -3,11 +3,26 @@
 RISK LIMITS - These are hard-coded for safety.
 """
 
+import os
 from decimal import Decimal
 
 # === ACCOUNT SETTINGS ===
-STARTING_BALANCE = Decimal("25.00")  # Actual USDC cash as of Feb 22
-STOP_LOSS_THRESHOLD = Decimal("5.00")  # Stop if balance drops below this (protect 80% of capital)
+STARTING_BALANCE = Decimal("100.00")  # Actual USDC capital
+
+# Cash reserve kept OUT of trading at all times — deployable capital is
+# (balance − reserve).  Defined as a fraction of capital so it scales with the
+# balance instead of being a stale absolute dollar amount.  20% keeps the same
+# 80%-deployable ratio the bot was tuned at when the balance was $25.
+RESERVE_FRACTION = Decimal("0.20")
+STOP_LOSS_THRESHOLD = (STARTING_BALANCE * RESERVE_FRACTION).quantize(Decimal("0.01"))  # $20 on $100
+
+# Circuit breaker: halt ALL trading once the balance has drawn down this far
+# from the starting capital.  THIS is the real "don't blow up" stop — separate
+# from the reserve above.  Previously the reserve doubled as the halt floor, so
+# at a $100 balance the bot would not have stopped until it was down to $5 (a
+# 95% loss).  A drawdown cap protects capital at any balance.
+MAX_DRAWDOWN_FRACTION = Decimal("0.20")  # protect 80% of capital
+HALT_BALANCE = (STARTING_BALANCE * (Decimal("1") - MAX_DRAWDOWN_FRACTION)).quantize(Decimal("0.01"))  # $80 on $100
 
 # === RISK RULE (SINGLE SOURCE OF TRUTH) ===
 # HARD non-negotiable: no single trade may cost more than this fraction of the
@@ -91,6 +106,23 @@ ENFORCE_COST_EDGE_GATE = True
 # go-live decisions.  The bot must re-accumulate CLEAN data (paper mode) after
 # the ledger fixes before any real-money allocation.  Set to the fix date.
 CLEAN_DATA_SINCE = "2026-07-03"
+
+# === INFORMATION EDGE (experimental, OFF by default) ===
+# The bot's edge engine only reprices the market's own quotes, so on its own it
+# has no independent view of the world.  `information.py` can fill the
+# `external_prob` hook with a real, news+LLM-derived probability estimate, and
+# the bot then bets only when that estimate diverges from the market by more
+# than trading costs.  This is the only path to an edge that is not luck.
+#
+# It stays completely inert unless BOTH are set in the environment:
+#   INFO_EDGE_ENABLED=1
+#   ANTHROPIC_API_KEY=<your key>      (and `pip install anthropic`)
+# Optional: INFO_EDGE_MODEL (default claude-sonnet-5).
+#
+# ⚠️  This is an unproven MECHANISM, not a validated money-maker.  Run it in
+# paper mode across many resolved markets and check the scorecard before it is
+# ever trusted with real capital.
+INFO_EDGE_ENABLED = os.environ.get("INFO_EDGE_ENABLED", "").lower() in ("1", "true", "yes")
 
 # === DASHBOARD ===
 DASHBOARD_PORT = 8080

@@ -42,9 +42,11 @@ from .swing_trader import SwingTrader
 from .risk_manager import RiskManager, order_cost
 from .dashboard import start_web_dashboard, print_cli_dashboard
 from .quant_engine import QuantEngine, extract_features
+from .information import InformationEngine, external_prob_for
 from .trading_config import (
     STARTING_BALANCE,
     STOP_LOSS_THRESHOLD,
+    HALT_BALANCE,
     ARB_BET_SIZE,
     SIGNAL_BET_SIZE,
     MAX_TRADES_PER_HOUR,
@@ -79,7 +81,10 @@ class TradingBot:
         
         # ─── v4: Adaptive quant engine ───
         self.quant_engine = QuantEngine()
-        
+
+        # ─── Information edge (inert unless INFO_EDGE_ENABLED + ANTHROPIC_API_KEY) ───
+        self.info_engine = InformationEngine()
+
         self.running = False
         self.trades_this_hour = 0
         self.last_hour_reset = datetime.utcnow()
@@ -162,7 +167,7 @@ class TradingBot:
         
         logger.info(f"Trading bot v4 initialized (paper_trading={self.paper_trading})")
         logger.info(f"Starting balance: ${self.executor.balance}")
-        logger.info(f"Stop loss: ${STOP_LOSS_THRESHOLD}")
+        logger.info(f"Reserve: ${STOP_LOSS_THRESHOLD} | Halt (circuit breaker) at: ${HALT_BALANCE}")
         logger.info(f"Risk manager active — per-strategy budgets enforced")
         return True
     
@@ -366,8 +371,8 @@ class TradingBot:
             
             # Check balance
             balance = self.executor.get_balance()
-            if balance <= STOP_LOSS_THRESHOLD:
-                logger.warning(f"Stop loss triggered! Balance: ${balance}")
+            if balance <= HALT_BALANCE:
+                logger.warning(f"Drawdown circuit breaker tripped! Balance ${balance} <= ${HALT_BALANCE}")
                 self.running = False
                 break
             
@@ -740,6 +745,28 @@ class TradingBot:
                 if self._has_position_in_market(signal.market_id, signal.token_id, signal.market_question):
                     continue
 
+                # ─── Information-edge gate ───
+                # Cheap longshots are where this bot historically bled: it bought
+                # them because they were cheap, and they resolved to $0.  When the
+                # information engine is active, require OUTSIDE information to say
+                # this outcome is genuinely more likely than its price before we
+                # buy.  Inert (no-op) unless INFO_EDGE_ENABLED + ANTHROPIC_API_KEY.
+                if self.info_engine.available:
+                    est = await self.info_engine.estimate(
+                        signal.market_question, signal.current_price
+                    )
+                    xprob = external_prob_for(est, signal.current_price)
+                    if xprob is None or xprob <= signal.current_price:
+                        logger.info(
+                            f"Info-edge blocked value bet (no confirming edge): "
+                            f"{signal.market_question[:40]}"
+                        )
+                        continue
+                    print(
+                        f"   📰 Info edge: est {float(xprob):.0%} vs price "
+                        f"{float(signal.current_price):.0%} — {est.rationale[:60]}"
+                    )
+
                 balance = self.executor.get_balance()
                 allowed, bet_size, risk_reason = self.risk_manager.check_trade(
                     "MOMENTUM", SIGNAL_BET_SIZE, balance,
@@ -1050,7 +1077,7 @@ class TradingBot:
         print(f"Mode: {'PAPER TRADING' if self.paper_trading else '🔴 LIVE TRADING'}")
         print(f"Balance: ${self.executor.balance}")
         print(f"Base bets: Arb ${ARB_BET_SIZE} | Signal ${SIGNAL_BET_SIZE}")
-        print(f"Risk rule: HARD max {MAX_TRADE_FRACTION:.0%} of balance per trade | ${STOP_LOSS_THRESHOLD} reserve floor")
+        print(f"Risk rule: HARD max {MAX_TRADE_FRACTION:.0%} of balance per trade | ${STOP_LOSS_THRESHOLD} reserve | halt at ${HALT_BALANCE}")
         print(f"Strategies: ARB · SWING · MOMENTUM · CORRELATED")
         print(f"Quant Engine: Bayesian scoring · calibration · feature learning")
         print(f"Dashboard: http://localhost:{DASHBOARD_PORT}")
@@ -1084,8 +1111,8 @@ class TradingBot:
             
             # Check stop loss
             balance = self.executor.get_balance()
-            if balance <= STOP_LOSS_THRESHOLD:
-                print(f"\n⛔ STOP LOSS TRIGGERED! Final balance: ${balance}")
+            if balance <= HALT_BALANCE:
+                print(f"\n⛔ DRAWDOWN CIRCUIT BREAKER! Balance ${balance} <= ${HALT_BALANCE} — halting.")
                 break
             
             # ── Phase 2: BUY — Scan for arbitrage (every cycle — free money) ──

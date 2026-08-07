@@ -4,6 +4,7 @@ Monitors markets for resolution and updates trade records with outcomes.
 """
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,6 +18,96 @@ from .database import get_connection, DB_PATH
 from .learning import LearningEngine
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_json_list(raw) -> list:
+    """Gamma returns outcomes/prices/token-ids as JSON-encoded strings."""
+    if isinstance(raw, list):
+        return raw
+    try:
+        return json.loads(raw) if isinstance(raw, str) else []
+    except Exception:
+        return []
+
+
+def settlement_from_market(market: dict) -> Optional[dict]:
+    """Pure: turn a Gamma market dict into resolution info, or None if open.
+
+    The key output is ``settlement_by_token`` — a map from CLOB token id to its
+    settled price (≈1 for the winner, ≈0 for losers).  Settling the token we
+    ACTUALLY hold is what stops "did any outcome win" from booking every
+    resolved bet as a jackpot.
+    """
+    if not market or not market.get("closed"):
+        return None
+
+    outcomes = _parse_json_list(market.get("outcomes", []))
+    prices = _parse_json_list(market.get("outcomePrices", ""))
+    token_ids = _parse_json_list(market.get("clobTokenIds", ""))
+
+    settlement_by_token: dict[str, Decimal] = {}
+    for i, tid in enumerate(token_ids):
+        if i < len(prices):
+            try:
+                settlement_by_token[str(tid)] = Decimal(str(prices[i]))
+            except Exception:
+                continue
+
+    winning_outcome = None
+    winning_price = Decimal("0")
+    for i, price in enumerate(prices):
+        try:
+            p = Decimal(str(price))
+        except Exception:
+            continue
+        if p > Decimal("0.99"):
+            if i < len(outcomes):
+                winning_outcome = outcomes[i]
+            winning_price = p
+            break
+
+    return {
+        "resolved": True,
+        "winning_outcome": winning_outcome,
+        "resolution_price": winning_price,
+        "settlement_by_token": settlement_by_token,
+        "market": market,
+    }
+
+
+async def fetch_market_resolution(market_id: str) -> Optional[dict]:
+    """Query the Gamma API and return resolution info for a market.
+
+    Returns a dict with ``resolved`` True/False (and settlement details when
+    resolved), or None on network/parse failure.  Shared by the resolution
+    tracker and the position manager so both settle a closed market the same
+    way.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{GAMMA_API_BASE}/markets",
+                params={"conditionId": market_id},
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            markets = response.json()
+            if not markets:
+                response = await client.get(
+                    f"{GAMMA_API_BASE}/markets/{market_id}", timeout=30.0,
+                )
+                if response.status_code == 200:
+                    markets = [response.json()]
+                else:
+                    return None
+            market = markets[0] if markets else None
+            if not market:
+                return None
+            settled = settlement_from_market(market)
+            return settled if settled is not None else {"resolved": False}
+    except Exception as e:
+        logger.error(f"Error checking resolution for {market_id}: {e}")
+        return None
 
 
 @dataclass
@@ -130,74 +221,12 @@ class ResolutionTracker:
     
     async def check_market_resolution(self, market_id: str) -> Optional[dict]:
         """Check if a market has resolved via Gamma API.
-        
-        Returns:
-            Resolution data if resolved, None otherwise
+
+        Thin wrapper around the shared ``fetch_market_resolution`` so the
+        position manager and resolution tracker settle markets identically.
         """
-        try:
-            async with httpx.AsyncClient() as client:
-                # Query the market by condition ID
-                response = await client.get(
-                    f"{GAMMA_API_BASE}/markets",
-                    params={"conditionId": market_id},
-                    timeout=30.0,
-                )
-                response.raise_for_status()
-                
-                markets = response.json()
-                if not markets:
-                    # Try by slug or ID
-                    response = await client.get(
-                        f"{GAMMA_API_BASE}/markets/{market_id}",
-                        timeout=30.0,
-                    )
-                    if response.status_code == 200:
-                        markets = [response.json()]
-                    else:
-                        return None
-                
-                market = markets[0] if markets else None
-                if not market:
-                    return None
-                
-                # Check if resolved
-                if market.get("closed"):
-                    # Get resolution outcome
-                    outcomes = market.get("outcomes", [])
-                    outcome_prices = market.get("outcomePrices", "")
-                    
-                    # Parse outcome prices (JSON string)
-                    import json
-                    try:
-                        prices = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
-                    except:
-                        prices = []
-                    
-                    # Find winning outcome (price = 1.0)
-                    winning_outcome = None
-                    winning_price = Decimal("0")
-                    
-                    for i, price in enumerate(prices):
-                        p = Decimal(str(price))
-                        if p > Decimal("0.99"):  # Winner
-                            if i < len(outcomes):
-                                winning_outcome = outcomes[i]
-                            winning_price = p
-                            break
-                    
-                    return {
-                        "resolved": True,
-                        "winning_outcome": winning_outcome,
-                        "resolution_price": winning_price,
-                        "market": market,
-                    }
-                
-                return {"resolved": False}
-                
-        except Exception as e:
-            logger.error(f"Error checking resolution for {market_id}: {e}")
-            return None
-    
+        return await fetch_market_resolution(market_id)
+
     def _already_closed(self, trade_id: int) -> bool:
         """True if this trade was already resolved/closed elsewhere.
 
@@ -247,34 +276,44 @@ class ResolutionTracker:
             )
             return None
 
-        winning_outcome = resolution.get("winning_outcome")
         resolution_price = resolution.get("resolution_price", Decimal("0"))
-        
+        settlement_by_token = resolution.get("settlement_by_token", {}) or {}
+
         # For arbitrage (BUY_BOTH), we always win $1 per unit
         if position.side == "BUY_BOTH":
             # Arbitrage: we bought both sides, one pays out $1
             pnl = position.size * (Decimal("1") - position.entry_price)
             won = True
         else:
-            # Single-side bet
-            # If we bought the winning side, we get $1 per share
-            # Our cost was entry_price * size
+            # Settle the token we ACTUALLY hold — not "did any outcome win".
+            # Earlier this used `resolution_price > 0.99`, which is true for
+            # EVERY resolved market (resolution_price is always the winner's
+            # ~1.0 price), so every resolved BUY was booked as a jackpot even
+            # when our token settled to $0.  We now look up our token_id in the
+            # market's settlement map.
+            token_settle = settlement_by_token.get(str(position.token_id))
+            if token_settle is None:
+                # Can't prove which side we hold → refuse to fabricate an
+                # outcome.  Leave the position OPEN for the next check/manual
+                # review rather than booking a phantom win or an unfair loss.
+                logger.warning(
+                    f"Trade {position.trade_id}: token {str(position.token_id)[:16]}… not "
+                    f"found in resolved market {position.market_id[:16]}… — leaving OPEN "
+                    f"(winning_outcome={resolution.get('winning_outcome')})"
+                )
+                return None
+
+            # token_settle is ~1 (our token won) or ~0 (it lost).
+            our_side_won = token_settle > Decimal("0.5")
             if position.side == "BUY":
-                # Check if our token won
-                # This is simplified - in reality we'd check token_id against winning token
-                if resolution_price > Decimal("0.99"):
-                    pnl = position.size * (Decimal("1") - position.entry_price)
-                    won = True
-                else:
-                    pnl = -position.size * position.entry_price
-                    won = False
-            else:  # SELL
-                if resolution_price < Decimal("0.01"):
-                    pnl = position.size * position.entry_price
-                    won = True
-                else:
-                    pnl = -position.size * (Decimal("1") - position.entry_price)
-                    won = False
+                # Bought the token: payout = settlement per share, cost = entry.
+                pnl = position.size * (token_settle - position.entry_price)
+                won = our_side_won
+            else:  # SELL / short the token: profit if it settles to 0.
+                pnl = position.size * (position.entry_price - token_settle)
+                won = not our_side_won
+            # Record the token's own settlement, not the market winner's price.
+            resolution_price = token_settle
         
         # Update position in database
         with get_connection(self.db_path) as conn:

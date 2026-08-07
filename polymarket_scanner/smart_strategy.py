@@ -405,9 +405,6 @@ class SmartStrategy:
                             # mathematical mispricings, not directional bets.
                             # 10% edge → 0.80, 50% edge → 0.90, 100%+ edge → 0.95
                             conf = min(0.95, 0.75 + float(min(rel_edge, Decimal("5"))) * 0.04)
-                            # Cheaper entries are safer — boost confidence for < $0.15
-                            if later["price"] < Decimal("0.15"):
-                                conf = min(0.95, conf + 0.05)
 
                             signals.append(SmartSignal(
                                 token_id=clob_ids[0],
@@ -491,11 +488,10 @@ class SmartStrategy:
                             continue
 
                         excl = "EXCL" if event_edge.is_exclusive else "INDEP"
-                        # Scale confidence with edge and cheap price
-                        # Event-level structural mispricings are reliable
+                        # Scale confidence with edge magnitude only.  A cheap
+                        # price is NOT evidence of safety — the outcome may
+                        # simply never happen — so it gets no confidence bonus.
                         evt_conf = min(0.95, 0.70 + float(mp.edge) * 3)
-                        if price < Decimal("0.15"):
-                            evt_conf = min(0.95, evt_conf + 0.05)
 
                         signals.append(SmartSignal(
                             token_id=token_id,
