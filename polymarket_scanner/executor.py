@@ -47,12 +47,34 @@ class TradingExecutor:
         self.trades_this_hour = 0
         self._initialized = False
     
+    def open_position_count(self) -> int:
+        """True open-position count, derived from the DB ledgers at check time.
+
+        The in-memory counter only ever leaked upward (resolutions never
+        decremented it), latching the bot at MAX_OPEN_POSITIONS for weeks.
+        The DB is the authority; the cached value is a fail-safe fallback.
+        """
+        try:
+            from .reconcile import count_truly_open
+            self.open_positions = count_truly_open()
+        except Exception as e:
+            logger.warning(
+                f"Open-position count query failed; using cached "
+                f"{self.open_positions}: {e}"
+            )
+        return self.open_positions
+
     def initialize(self) -> bool:
         """Initialize the CLOB client with credentials.
-        
+
         Returns:
             True if successfully initialized, False otherwise
         """
+        # Startup reconciliation: derive real exposure from the DB rather
+        # than starting from zero (a restart used to reset the count).
+        self.open_position_count()
+        logger.info(f"[INIT] Open positions from DB: {self.open_positions}")
+
         if self.paper_trading:
             logger.info("Paper trading mode - no credentials required")
             self._initialized = True
@@ -144,8 +166,8 @@ class TradingExecutor:
         if current_balance - bet_size < STOP_LOSS_THRESHOLD:
             return False, f"Trade would breach stop loss"
         
-        # Check open positions
-        if self.open_positions >= MAX_OPEN_POSITIONS:
+        # Check open positions (derived from the DB, not the in-memory counter)
+        if self.open_position_count() >= MAX_OPEN_POSITIONS:
             return False, f"Max open positions reached: {MAX_OPEN_POSITIONS}"
         
         # Check sufficient balance
