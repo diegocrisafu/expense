@@ -70,6 +70,25 @@ def count_truly_open(db_path: str = DB_PATH) -> int:
     return len(classify_open_positions(db_path)[0])
 
 
+def repair_ghosts(db_path: str = DB_PATH) -> int:
+    """Mark ghost OPEN rows CLOSED_ELSEWHERE (same rule resolve_position applies).
+
+    No P&L is touched — the ledger that settled each trade owns the outcome.
+    Returns the number of rows repaired.
+    """
+    _, ghosts = classify_open_positions(db_path)
+    with get_connection(db_path) as conn:
+        cursor = conn.cursor()
+        for g in ghosts:
+            cursor.execute(
+                "UPDATE positions SET status = 'CLOSED_ELSEWHERE', "
+                "resolved_at = CURRENT_TIMESTAMP WHERE trade_id = ? AND status = 'OPEN'",
+                (g["trade_id"],),
+            )
+        conn.commit()
+    return len(ghosts)
+
+
 def _age_days(ts: str | None) -> str:
     if not ts:
         return "?"
@@ -110,7 +129,12 @@ def print_report(db_path: str = DB_PATH) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Reconcile position ledgers")
     parser.add_argument("--db", default=DB_PATH, help="Path to the SQLite database")
+    parser.add_argument("--repair-ghosts", action="store_true",
+                        help="mark ghost OPEN rows CLOSED_ELSEWHERE, then report")
     args = parser.parse_args()
+    if args.repair_ghosts:
+        repaired = repair_ghosts(args.db)
+        print(f"Repaired {repaired} ghost row(s).\n")
     print_report(args.db)
 
 

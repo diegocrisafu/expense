@@ -4,7 +4,11 @@ import sqlite3
 
 import pytest
 
-from polymarket_scanner.reconcile import classify_open_positions, count_truly_open
+from polymarket_scanner.reconcile import (
+    classify_open_positions,
+    count_truly_open,
+    repair_ghosts,
+)
 
 
 @pytest.fixture
@@ -68,3 +72,20 @@ class TestClassifyOpenPositions:
 
     def test_count_truly_open(self, db):
         assert count_truly_open(db) == 1
+
+
+class TestRepairGhosts:
+    def test_repair_closes_ghosts_and_keeps_truly_open(self, db):
+        assert repair_ghosts(db) == 2
+        truly_open, ghosts = classify_open_positions(db)
+        assert [p["trade_id"] for p in truly_open] == [1]
+        assert ghosts == []
+        conn = sqlite3.connect(db)
+        statuses = dict(conn.execute(
+            "SELECT trade_id, status FROM positions WHERE trade_id IN (2,3)"))
+        conn.close()
+        assert statuses == {2: "CLOSED_ELSEWHERE", 3: "CLOSED_ELSEWHERE"}
+
+    def test_repair_is_idempotent(self, db):
+        repair_ghosts(db)
+        assert repair_ghosts(db) == 0

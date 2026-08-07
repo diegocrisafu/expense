@@ -241,9 +241,20 @@ class ResolutionTracker:
         # longshots we sold at a profit were re-booked as worthless-expiry
         # losses when the market finally settled.
         if self._already_closed(position.trade_id):
-            logger.debug(
-                f"Skipping resolution for trade {position.trade_id}: "
-                f"already closed by the position manager."
+            # Close out the ghost row so this position stops being re-checked
+            # every cycle and stops counting as open exposure.  No P&L is
+            # booked here — the ledger that settled it owns the outcome.
+            with get_connection(self.db_path) as conn:
+                conn.cursor().execute(
+                    "UPDATE positions SET status = 'CLOSED_ELSEWHERE', "
+                    "resolved_at = CURRENT_TIMESTAMP "
+                    "WHERE trade_id = ? AND status = 'OPEN'",
+                    (position.trade_id,),
+                )
+                conn.commit()
+            logger.info(
+                f"Closed ghost positions row for trade {position.trade_id}: "
+                f"already settled by the position manager or P&L ledger."
             )
             return None
 
