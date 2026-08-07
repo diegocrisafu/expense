@@ -36,7 +36,7 @@ from .models import OpportunityType
 from .learning import LearningEngine
 from .resolution import ResolutionTracker
 from .aggressive import AggressiveTrader
-from .position_manager import PositionManager
+from .position_manager import PositionManager, position_record
 from .smart_strategy import SmartStrategy
 from .swing_trader import SwingTrader
 from .risk_manager import RiskManager, order_cost
@@ -293,47 +293,33 @@ class TradingBot:
                 
                 # ─── QUANT ENGINE: Record outcome for learning ───
                 try:
-                    pos = next(
-                        (p for p in self.position_manager._load_active_positions()
-                         if p.position_id == sig.position_id), None
-                    )
-                    if pos is None:
-                        # Position already closed, reconstruct minimal features
-                        won = sig.expected_pnl > 0
+                    # execute_exit has already closed the row, so look the
+                    # position up in a way that works for CLOSED rows too —
+                    # the active-only lookup sent every outcome to "UNKNOWN".
+                    rec = position_record(sig.position_id, DB_PATH)
+                    won = sig.expected_pnl > 0
+                    if rec is None:
                         features = extract_features(
                             strategy="UNKNOWN", mode="unknown", side="BUY",
                             price=float(sig.trigger_price),
                             edge=0.05,
                             confidence=0.5,
                         )
+                        trade_id = 0
                     else:
-                        won = sig.expected_pnl > 0
-                        # Look up strategy from trade_history
-                        strat = "UNKNOWN"
-                        try:
-                            from .database import get_connection as _gc
-                            with _gc(DB_PATH) as conn:
-                                cursor = conn.cursor()
-                                cursor.execute(
-                                    "SELECT strategy FROM trade_history WHERE id = ?",
-                                    (pos.trade_id,)
-                                )
-                                row = cursor.fetchone()
-                                if row:
-                                    strat = row[0] or "UNKNOWN"
-                        except Exception:
-                            pass
+                        entry = rec["entry_price"]
                         features = extract_features(
-                            strategy=strat, mode=sig.reason.lower(), side=pos.side,
-                            price=float(pos.entry_price),
+                            strategy=rec["strategy"], mode=sig.reason.lower(), side=rec["side"],
+                            price=float(entry),
                             spread=0.03,  # approximate
-                            edge=float(pos.take_profit_price - pos.entry_price) / float(pos.entry_price) if pos.entry_price > 0 else 0.05,
+                            edge=float(rec["take_profit_price"] - entry) / float(entry) if entry > 0 else 0.05,
                             confidence=0.5,
                         )
+                        trade_id = rec["trade_id"]
                     self.quant_engine.record_outcome(
                         features, won=won,
                         pnl=float(sig.expected_pnl),
-                        trade_id=getattr(pos, 'trade_id', 0) if pos else 0,
+                        trade_id=trade_id,
                     )
                 except Exception as e:
                     logger.debug(f"Quant outcome recording failed: {e}")

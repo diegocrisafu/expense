@@ -102,6 +102,31 @@ class ExitSignal:
     urgency: int = 1     # 1=normal, 2=high, 3=critical
 
 
+def position_record(position_id: int, db_path: str = DB_PATH) -> Optional[dict]:
+    """Attribution record for a managed position, open or CLOSED.
+
+    The learner runs after execute_exit has already closed the row, so any
+    lookup restricted to active positions loses the strategy attribution.
+    """
+    with get_connection(db_path) as conn:
+        row = conn.cursor().execute("""
+            SELECT mp.trade_id, mp.side, mp.entry_price, mp.take_profit_price,
+                   COALESCE(th.strategy, 'UNKNOWN')
+            FROM managed_positions mp
+            LEFT JOIN trade_history th ON th.id = mp.trade_id
+            WHERE mp.id = ?
+        """, (position_id,)).fetchone()
+    if row is None:
+        return None
+    return {
+        "trade_id": row[0],
+        "side": row[1] or "BUY",
+        "entry_price": Decimal(str(row[2] or 0)),
+        "take_profit_price": Decimal(str(row[3] or 0)),
+        "strategy": row[4] or "UNKNOWN",
+    }
+
+
 class PositionManager:
     """Actively manages open positions with exit strategies.
 
