@@ -12,7 +12,7 @@ from typing import Optional
 
 import httpx
 
-from .config import GAMMA_API_BASE
+from .config import CLOB_API_BASE, GAMMA_API_BASE
 from .database import get_connection, DB_PATH
 from .learning import LearningEngine
 
@@ -129,71 +129,44 @@ class ResolutionTracker:
             ]
     
     async def check_market_resolution(self, market_id: str) -> Optional[dict]:
-        """Check if a market has resolved via Gamma API.
-        
+        """Check if a market has resolved, via the CLOB market record.
+
+        The old gamma query (/markets?conditionId=) silently ignores the
+        filter and returns an arbitrary market listing, so resolution was
+        being judged against unrelated markets.  The CLOB endpoint keys on
+        the condition id directly and carries per-token winner flags.
+
         Returns:
-            Resolution data if resolved, None otherwise
+            Resolution data if the lookup succeeded, None on error.
         """
         try:
             async with httpx.AsyncClient() as client:
-                # Query the market by condition ID
                 response = await client.get(
-                    f"{GAMMA_API_BASE}/markets",
-                    params={"conditionId": market_id},
+                    f"{CLOB_API_BASE}/markets/{market_id}",
                     timeout=30.0,
                 )
-                response.raise_for_status()
-                
-                markets = response.json()
-                if not markets:
-                    # Try by slug or ID
-                    response = await client.get(
-                        f"{GAMMA_API_BASE}/markets/{market_id}",
-                        timeout=30.0,
-                    )
-                    if response.status_code == 200:
-                        markets = [response.json()]
-                    else:
-                        return None
-                
-                market = markets[0] if markets else None
-                if not market:
+                if response.status_code != 200:
                     return None
-                
-                # Check if resolved
-                if market.get("closed"):
-                    # Get resolution outcome
-                    outcomes = market.get("outcomes", [])
-                    outcome_prices = market.get("outcomePrices", "")
-                    
-                    # Parse outcome prices (JSON string)
-                    import json
-                    try:
-                        prices = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
-                    except:
-                        prices = []
-                    
-                    # Find winning outcome (price = 1.0)
-                    winning_outcome = None
-                    winning_price = Decimal("0")
-                    
-                    for i, price in enumerate(prices):
-                        p = Decimal(str(price))
-                        if p > Decimal("0.99"):  # Winner
-                            if i < len(outcomes):
-                                winning_outcome = outcomes[i]
-                            winning_price = p
-                            break
-                    
-                    return {
-                        "resolved": True,
-                        "winning_outcome": winning_outcome,
-                        "resolution_price": winning_price,
-                        "market": market,
-                    }
-                
+                market = response.json()
+
+            if not market or not market.get("closed"):
                 return {"resolved": False}
-                
+
+            winner = next(
+                (t for t in market.get("tokens", []) if t.get("winner")), None
+            )
+            if winner is None:
+                # Closed but not yet settled — treat as unresolved
+                return {"resolved": False}
+
+            return {
+                "resolved": True,
+                "winner_token_id": winner.get("token_id"),
+                "winning_outcome": winner.get("outcome"),
+                "resolution_price": Decimal("1"),
+                "market": market,
+            }
+
         except Exception as e:
             logger.error(f"Error checking resolution for {market_id}: {e}")
             return None
@@ -258,29 +231,34 @@ class ResolutionTracker:
             )
             return None
 
-        winning_outcome = resolution.get("winning_outcome")
         resolution_price = resolution.get("resolution_price", Decimal("0"))
-        
+        winner_token_id = resolution.get("winner_token_id")
+
         # For arbitrage (BUY_BOTH), we always win $1 per unit
         if position.side == "BUY_BOTH":
             # Arbitrage: we bought both sides, one pays out $1
             pnl = position.size * (Decimal("1") - position.entry_price)
             won = True
         else:
-            # Single-side bet
-            # If we bought the winning side, we get $1 per share
-            # Our cost was entry_price * size
+            # Single-side bet: settle against OUR token, not the headline
+            # price — judging by resolution_price alone booked WINs on
+            # losing tokens.  Without winner information, do not settle.
+            if winner_token_id is None:
+                logger.warning(
+                    f"No winner token for trade {position.trade_id}; "
+                    f"leaving position open."
+                )
+                return None
+            held_won = position.token_id == winner_token_id
             if position.side == "BUY":
-                # Check if our token won
-                # This is simplified - in reality we'd check token_id against winning token
-                if resolution_price > Decimal("0.99"):
+                if held_won:
                     pnl = position.size * (Decimal("1") - position.entry_price)
                     won = True
                 else:
                     pnl = -position.size * position.entry_price
                     won = False
             else:  # SELL
-                if resolution_price < Decimal("0.01"):
+                if not held_won:
                     pnl = position.size * position.entry_price
                     won = True
                 else:
