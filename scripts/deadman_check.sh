@@ -13,21 +13,29 @@ STATE_LOG="$DIR/deadman.log"
 
 LOG_STALL_MIN=30
 TRADE_STALL_HOURS=48
+ALERT_COOLDOWN_HOURS=6   # per condition: notify at most once per this window
 
 alert() {
-    local msg="$1"
+    local key="$1" msg="$2"
+    local marker="$DIR/.deadman_last_${key}"
+    local now epoch_last
+    now=$(date +%s)
+    epoch_last=$(cat "$marker" 2>/dev/null || echo 0)
     echo "$(date '+%Y-%m-%d %H:%M:%S') ALERT: $msg" >> "$STATE_LOG"
-    osascript -e "display notification \"$msg\" with title \"Roger deadman\" sound name \"Basso\"" 2>/dev/null
+    if [ $(( now - epoch_last )) -ge $(( ALERT_COOLDOWN_HOURS * 3600 )) ]; then
+        echo "$now" > "$marker"
+        osascript -e "display notification \"$msg\" with title \"Roger deadman\" sound name \"Basso\"" 2>/dev/null
+    fi
 }
 
 # 1) Log freshness
 if [ -f "$LOGFILE" ]; then
     log_age_min=$(( ( $(date +%s) - $(stat -f %m "$LOGFILE") ) / 60 ))
     if [ "$log_age_min" -ge "$LOG_STALL_MIN" ]; then
-        alert "Bot log silent for ${log_age_min}m (threshold ${LOG_STALL_MIN}m)"
+        alert log "Bot log silent for ${log_age_min}m (threshold ${LOG_STALL_MIN}m)"
     fi
 else
-    alert "Bot log missing: $LOGFILE"
+    alert log "Bot log missing: $LOGFILE"
 fi
 
 # 2) Trade freshness (clean-period ledger)
@@ -38,7 +46,7 @@ if [ -f "$DB" ]; then
         if [ -n "$last_epoch" ]; then
             trade_age_h=$(( ( $(date +%s) - last_epoch ) / 3600 ))
             if [ "$trade_age_h" -ge "$TRADE_STALL_HOURS" ]; then
-                alert "No trade recorded in ${trade_age_h}h (threshold ${TRADE_STALL_HOURS}h)"
+                alert trade "No trade recorded in ${trade_age_h}h (threshold ${TRADE_STALL_HOURS}h)"
             fi
         fi
     fi

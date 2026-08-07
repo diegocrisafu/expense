@@ -41,7 +41,14 @@ start_bot() {
     rotate_logs
 
     # nohup keeps it alive after terminal closes
-    nohup "$PYTHON" -m polymarket_scanner.trading_bot --live --interval 60 \
+    # PAPER MODE by default. Live trading requires an explicit, deliberate
+    # opt-in: ROGER_LIVE=1 ./run_roger.sh start
+    LIVE_FLAG=""
+    if [ "$ROGER_LIVE" = "1" ]; then
+        echo "🔴 ROGER_LIVE=1 — starting in LIVE TRADING mode"
+        LIVE_FLAG="--live"
+    fi
+    nohup "$PYTHON" -m polymarket_scanner.trading_bot $LIVE_FLAG --interval 60 \
         >> "$LOGFILE" 2>&1 &
 
     echo $! > "$PIDFILE"

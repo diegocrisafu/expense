@@ -138,10 +138,13 @@ class TradingBot:
                         self._recently_traded_markets.add(row[0])
                     if row[1]:
                         self._recently_traded_tokens.add(row[1])
-                # Blacklist markets with 3+ PENDING trades (never fill = dead/expired)
+                # Blacklist markets with 3+ recent PENDING trades (never fill =
+                # dead/expired). Windowed: months-old pending junk (590 stale
+                # pre-clean rows) says nothing about a market today.
                 cursor.execute("""
                     SELECT market_id, COUNT(*) as cnt FROM trade_history
                     WHERE status = 'PENDING'
+                      AND timestamp > datetime('now', '-14 days')
                     GROUP BY market_id HAVING cnt >= 3
                 """)
                 for row in cursor.fetchall():
