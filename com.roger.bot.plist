@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Roger paper-trading bot — launchd supervisor.
+  DO NOT INSTALL until the fix branch is approved and merged: KeepAlive on
+  unfixed code is a crash loop, not monitoring.
+
+  Install (after approval):
+    cp com.roger.bot.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.roger.bot.plist
+  Remove:
+    launchctl unload ~/Library/LaunchAgents/com.roger.bot.plist
+
+  PAPER MODE ONLY: no - -live flag here, deliberately.  (Note: run_roger.sh
+  as committed passes - -live; do not copy its command line.)
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.roger.bot</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/diegocrisafulli/Documents/expense</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/diegocrisafulli/Documents/expense/.venv/bin/python</string>
+        <string>-u</string>
+        <string>-m</string>
+        <string>polymarket_scanner.trading_bot</string>
+        <string>--interval</string>
+        <string>60</string>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/diegocrisafulli/Documents/expense/roger_paper.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/diegocrisafulli/Documents/expense/roger_paper.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <!-- Back off between crash restarts instead of spinning -->
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+</dict>
+</plist>

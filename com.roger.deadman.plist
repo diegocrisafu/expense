@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Roger deadman alert — runs scripts/deadman_check.sh every 15 minutes.
+  Read-only monitoring; alerts via macOS notification when the bot log is
+  silent or no trades have been recorded.  INSTALL LAST, with the bot plist:
+    cp com.roger.deadman.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.roger.deadman.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.roger.deadman</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/diegocrisafulli/Documents/expense/scripts/deadman_check.sh</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
