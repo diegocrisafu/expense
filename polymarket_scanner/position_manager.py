@@ -117,6 +117,11 @@ class PositionManager:
     # If bid stays below this fraction of entry for this many hours, consider dead
     DEAD_MARKET_BID_RATIO = Decimal("0.01")  # bid < 1% of entry
     DEAD_MARKET_HOURS = 24  # must be dead for 24h
+    # Gain quotes at/above this bid, or above this multiple of entry, must be
+    # independently confirmed against the market's token records before any
+    # exit is booked on them
+    SETTLEMENT_SUSPECT_BID = Decimal("0.99")
+    PLAUSIBLE_GAIN_MULTIPLE = Decimal("4")
 
     def __init__(self, executor=None, db_path: str = None):
         self.db_path = db_path or DB_PATH
@@ -298,6 +303,39 @@ class PositionManager:
         except Exception as e:
             logger.debug(f"Price fetch failed for {token_id[:20]}: {e}")
             return None
+
+    async def _fetch_clob_market(self, market_id: str) -> Optional[dict]:
+        """Fetch the market record (tokens, winner flags, closed) from the CLOB."""
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{CLOB_HOST}/markets/{market_id}", timeout=15.0)
+                if resp.status_code != 200:
+                    return None
+                return resp.json()
+        except Exception as e:
+            logger.debug(f"CLOB market fetch failed for {market_id[:20]}: {e}")
+            return None
+
+    async def _suspect_bid_confirmed(self, pos: ManagedPosition, bid: Decimal) -> bool:
+        """Independently confirm a settlement-priced or outsized gain quote.
+
+        Confirmed means: the market is settled and OUR token is the winner,
+        or the market is open and its own record prices our token near the
+        quoted bid.  Anything unknown or contradictory is NOT confirmed.
+        """
+        market = await self._fetch_clob_market(pos.market_id)
+        if not market:
+            return False
+        ours = next((t for t in market.get("tokens", [])
+                     if t.get("token_id") == pos.token_id), None)
+        if ours is None:
+            return False
+        if market.get("closed"):
+            return bool(ours.get("winner"))
+        clob_price = ours.get("price")
+        if clob_price is None:
+            return False
+        return Decimal(str(clob_price)) >= bid - Decimal("0.10")
 
     async def _fetch_full_book(self, token_id: str) -> Optional[dict]:
         """Fetch the full orderbook for smart exit analysis.
@@ -505,6 +543,22 @@ class PositionManager:
                 continue
 
             live_price, bid_price = price_data
+
+            # --- PHANTOM-FILL GUARD ---
+            # /book can serve the winning complement's quote for a losing
+            # token near settlement (and a bid-less book falls back to the
+            # ask): every settlement-priced TAKE_PROFIT ever booked was on
+            # the losing side.  A gain this large must be provable or it
+            # doesn't book — an unverifiable quote is retried next cycle.
+            if (bid_price > pos.entry_price
+                    and (bid_price >= self.SETTLEMENT_SUSPECT_BID
+                         or bid_price >= pos.entry_price * self.PLAUSIBLE_GAIN_MULTIPLE)
+                    and not await self._suspect_bid_confirmed(pos, bid_price)):
+                logger.error(
+                    f"Implausible bid ${bid_price} (entry ${pos.entry_price}) not confirmed "
+                    f"by market records — skipping exits for: {pos.market_question[:40]}"
+                )
+                continue
 
             # Detect resolved/dead markets: bid near zero for extended time
             if (bid_price < pos.entry_price * self.DEAD_MARKET_BID_RATIO
