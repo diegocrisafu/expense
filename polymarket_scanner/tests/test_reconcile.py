@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from polymarket_scanner.reconcile import (
+    cancel_orphan_attempts,
     classify_open_positions,
     count_truly_open,
     repair_ghosts,
@@ -89,3 +90,24 @@ class TestRepairGhosts:
     def test_repair_is_idempotent(self, db):
         repair_ghosts(db)
         assert repair_ghosts(db) == 0
+
+
+class TestCancelOrphanAttempts:
+    def test_cancels_only_attempts_without_positions(self, db):
+        conn = sqlite3.connect(db)
+        # orphan: PENDING, never became a position (blocked at the risk gate)
+        conn.execute("INSERT INTO trade_history (id, timestamp, market_question, status) "
+                     "VALUES (5, '2026-08-01 00:00:00', 'blocked attempt', 'PENDING')")
+        conn.commit()
+        conn.close()
+        assert cancel_orphan_attempts(db) == 1
+        conn = sqlite3.connect(db)
+        statuses = dict(conn.execute(
+            "SELECT id, status FROM trade_history WHERE id IN (1, 5)"))
+        conn.close()
+        # the real open trade (has a positions row) must stay PENDING
+        assert statuses == {1: "PENDING", 5: "CANCELLED"}
+
+    def test_idempotent(self, db):
+        cancel_orphan_attempts(db)
+        assert cancel_orphan_attempts(db) == 0

@@ -60,32 +60,36 @@ class DashboardData:
 
     # --- Balance ---
     def get_current_balance(self) -> Decimal:
-        """Approximate balance from trade history."""
+        """Realized balance from the unified P&L ledger (clean data only).
+
+        The old source was the `trades` arb log, whose profits are near
+        zero — it hid both the phantom gains and the real losses.
+        """
         row = self._safe_query_one("""
-            SELECT
-                COALESCE(SUM(CASE WHEN mode = 'PAPER' THEN CAST(profit AS FLOAT) ELSE 0 END), 0) as paper_profit,
-                COALESCE(SUM(CASE WHEN mode != 'PAPER' THEN CAST(profit AS FLOAT) ELSE 0 END), 0) as live_profit
-            FROM trades
-        """)
+            SELECT COALESCE(SUM(CAST(pnl AS FLOAT)), 0) as realized
+            FROM trade_history
+            WHERE timestamp >= ? AND pnl IS NOT NULL
+        """, (CLEAN_DATA_SINCE,))
         if row:
-            return STARTING_BALANCE + Decimal(str(row["paper_profit"])) + Decimal(str(row["live_profit"]))
+            return STARTING_BALANCE + Decimal(str(row["realized"]))
         return STARTING_BALANCE
 
     # --- Trades ---
     def get_trade_summary(self) -> dict:
-        """Overall trade statistics."""
+        """Overall trade statistics from the unified ledger (clean data only)."""
         row = self._safe_query_one("""
             SELECT
                 COUNT(*) as total_trades,
-                COALESCE(SUM(CAST(profit AS FLOAT)), 0) as total_profit,
+                COALESCE(SUM(CAST(pnl AS FLOAT)), 0) as total_profit,
                 COALESCE(SUM(CAST(size AS FLOAT)), 0) as total_volume,
-                COALESCE(SUM(CASE WHEN CAST(profit AS FLOAT) > 0 THEN 1 ELSE 0 END), 0) as wins,
-                COALESCE(SUM(CASE WHEN CAST(profit AS FLOAT) < 0 THEN 1 ELSE 0 END), 0) as losses,
-                COALESCE(SUM(CASE WHEN CAST(profit AS FLOAT) = 0 THEN 1 ELSE 0 END), 0) as pending,
+                COALESCE(SUM(CASE WHEN CAST(pnl AS FLOAT) > 0 THEN 1 ELSE 0 END), 0) as wins,
+                COALESCE(SUM(CASE WHEN CAST(pnl AS FLOAT) < 0 THEN 1 ELSE 0 END), 0) as losses,
+                COALESCE(SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END), 0) as pending,
                 MIN(timestamp) as first_trade,
                 MAX(timestamp) as last_trade
-            FROM trades
-        """)
+            FROM trade_history
+            WHERE timestamp >= ?
+        """, (CLEAN_DATA_SINCE,))
         return row or {}
 
     def get_recent_trades(self, limit: int = 20) -> list[dict]:

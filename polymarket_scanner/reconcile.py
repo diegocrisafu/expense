@@ -89,6 +89,40 @@ def repair_ghosts(db_path: str = DB_PATH) -> int:
     return len(ghosts)
 
 
+def cancel_orphan_attempts(db_path: str = DB_PATH) -> int:
+    """Cancel PENDING trade_history rows that never became a position.
+
+    record_trade runs before the executor's risk gate, so a blocked order
+    leaves an orphan PENDING attempt row (250 accrued during the counter
+    latch).  An attempt is an orphan when no positions row and no
+    managed_positions row exist for its trade id.  Reversible: rows go to
+    CANCELLED with original_status/quarantine_reason set where available.
+    """
+    base = """
+        UPDATE trade_history
+        SET status = 'CANCELLED'{extra}
+        WHERE status = 'PENDING'
+          AND id NOT IN (SELECT trade_id FROM positions
+                         WHERE trade_id IS NOT NULL)
+          AND id NOT IN (SELECT trade_id FROM managed_positions
+                         WHERE trade_id IS NOT NULL)
+    """
+    with_reason = base.format(extra=(
+        ", original_status = 'PENDING'"
+        ", quarantine_reason = 'orphan attempt: blocked before execution;"
+        " no position ever existed'"
+    ))
+    with get_connection(db_path) as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(with_reason)
+        except Exception:
+            cursor.execute(base.format(extra=""))
+        n = cursor.rowcount
+        conn.commit()
+    return n
+
+
 def _age_days(ts: str | None) -> str:
     if not ts:
         return "?"
@@ -131,10 +165,15 @@ def main() -> None:
     parser.add_argument("--db", default=DB_PATH, help="Path to the SQLite database")
     parser.add_argument("--repair-ghosts", action="store_true",
                         help="mark ghost OPEN rows CLOSED_ELSEWHERE, then report")
+    parser.add_argument("--cancel-orphans", action="store_true",
+                        help="cancel PENDING attempt rows that never became a position")
     args = parser.parse_args()
     if args.repair_ghosts:
         repaired = repair_ghosts(args.db)
         print(f"Repaired {repaired} ghost row(s).\n")
+    if args.cancel_orphans:
+        cancelled = cancel_orphan_attempts(args.db)
+        print(f"Cancelled {cancelled} orphan attempt row(s).\n")
     print_report(args.db)
 
 

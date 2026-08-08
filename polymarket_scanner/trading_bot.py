@@ -169,6 +169,26 @@ class TradingBot:
         logger.info(f"Risk manager active — per-strategy budgets enforced")
         return True
     
+
+    def _execute_or_cancel(self, trade_id, token_id, side, price, source) -> bool:
+        """Execute a signal trade; cancel the ledger attempt row if blocked.
+
+        record_trade runs before the executor's risk gate, so a blocked
+        order used to leave an orphan PENDING row in trade_history
+        (250 accrued while the counter latch blocked everything).
+        """
+        if self.executor.execute_signal_trade(token_id, side, price, source):
+            return True
+        self.learning.cancel_trade(trade_id)
+        return False
+
+    def _execute_arb_or_cancel(self, trade_id, opp) -> bool:
+        """Arbitrage variant of _execute_or_cancel."""
+        if self.executor.execute_arbitrage(opp):
+            return True
+        self.learning.cancel_trade(trade_id)
+        return False
+
     def _check_hourly_limits(self) -> bool:
         """Reset hourly trade counter and check limits."""
         now = datetime.utcnow()
@@ -424,7 +444,7 @@ class TradingBot:
                     )
                     
                     # Execute!
-                    if self.executor.execute_arbitrage(opp):
+                    if self._execute_arb_or_cancel(trade_id, opp):
                         self.resolution_tracker.record_position(
                             trade_id=trade_id,
                             market_id=market.market_id,
@@ -561,7 +581,7 @@ class TradingBot:
                 category=sig.mode.lower(),
             )
             
-            if self.executor.execute_signal_trade(
+            if self._execute_or_cancel(trade_id, 
                 sig.token_id, sig.side,
                 sig.current_price, f"swing_{sig.mode}",
             ):
@@ -674,7 +694,7 @@ class TradingBot:
                 category="momentum",
             )
             
-            if self.executor.execute_signal_trade(
+            if self._execute_or_cancel(trade_id, 
                 signal.token_id,
                 signal.side,
                 signal.current_price,
@@ -775,7 +795,7 @@ class TradingBot:
                     category="value_hunter",
                 )
 
-                if self.executor.execute_signal_trade(
+                if self._execute_or_cancel(trade_id, 
                     signal.token_id, signal.side,
                     signal.current_price, "value_hunter",
                 ):
@@ -872,7 +892,7 @@ class TradingBot:
                     category="mispriced",
                 )
 
-                if self.executor.execute_signal_trade(
+                if self._execute_or_cancel(trade_id, 
                     signal.token_id, signal.side,
                     signal.current_price, "mispriced_edge",
                 ):
@@ -990,7 +1010,7 @@ class TradingBot:
                     category=sig.strategy.lower(),
                 )
                 
-                if self.executor.execute_signal_trade(
+                if self._execute_or_cancel(trade_id, 
                     sig.token_id, sig.side,
                     sig.current_price, f"smart_{sig.strategy}",
                 ):

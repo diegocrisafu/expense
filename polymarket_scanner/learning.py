@@ -181,7 +181,17 @@ class LearningEngine:
                   str(entry_price), str(size)))
             conn.commit()
             return cursor.lastrowid
-    
+
+    def cancel_trade(self, trade_id: int) -> None:
+        """Mark an attempt row CANCELLED — the order was blocked, never executed."""
+        with get_connection(self.db_path) as conn:
+            conn.cursor().execute(
+                "UPDATE trade_history SET status = 'CANCELLED' "
+                "WHERE id = ? AND status = 'PENDING'",
+                (trade_id,),
+            )
+            conn.commit()
+
     def resolve_trade(
         self,
         trade_id: int,
