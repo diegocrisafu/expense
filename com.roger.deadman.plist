@@ -14,8 +14,8 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
-        <string>/Users/diegocrisafulli/Documents/expense/scripts/deadman_check.sh</string>
+        <string>/Users/diegocrisafulli/Documents/expense/.venv/bin/python</string>
+        <string>/Users/diegocrisafulli/Documents/expense/scripts/deadman_check.py</string>
     </array>
 
     <key>StartInterval</key>
