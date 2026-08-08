@@ -19,23 +19,18 @@
     <key>Label</key>
     <string>com.roger.bot</string>
 
-    <key>WorkingDirectory</key>
-    <string>/Users/diegocrisafulli/Documents/expense</string>
-
+    <!--
+      No WorkingDirectory and no Standard*Path on purpose: launchd performs
+      those itself and is TCC-blocked from ~/Documents (EX_CONFIG/78).
+      scripts/roger_launch.py does the chdir, log rotation and redirection
+      from inside the interpreter, which does hold Full Disk Access.
+    -->
     <key>ProgramArguments</key>
     <array>
         <string>/Users/diegocrisafulli/Documents/expense/.venv/bin/python</string>
         <string>-u</string>
-        <string>-m</string>
-        <string>polymarket_scanner.trading_bot</string>
-        <string>--interval</string>
-        <string>60</string>
+        <string>/Users/diegocrisafulli/Documents/expense/scripts/roger_launch.py</string>
     </array>
-
-    <key>StandardOutPath</key>
-    <string>/Users/diegocrisafulli/Documents/expense/roger_paper.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/diegocrisafulli/Documents/expense/roger_paper.log</string>
 
     <key>RunAtLoad</key>
     <true/>
