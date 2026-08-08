@@ -216,8 +216,10 @@ class LearningEngine:
             entry_price = Decimal(entry_price)
             size = Decimal(size)
             
-            # Calculate P&L
-            if side == "BUY":
+            # Calculate P&L. BUY_BOTH (arbitrage) is a long position like BUY —
+            # both legs are bought and one pays $1 — so it must not fall through
+            # to the SELL formula, which inverts the sign.
+            if side in ("BUY", "BUY_BOTH"):
                 pnl = (exit_price - entry_price) * size
             else:
                 pnl = (entry_price - exit_price) * size
