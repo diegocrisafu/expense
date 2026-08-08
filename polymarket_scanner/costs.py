@@ -24,6 +24,11 @@ TAKER_FEE_BPS = Decimal("200")        # 2% per leg — matches executor fee_rate
 DEFAULT_SLIPPAGE_BPS = Decimal("50")  # 0.5% assumed slippage per leg on entry/exit
 _BPS = Decimal("10000")
 
+# CLOB minimum price increment.  The book can never be tighter than this, so a
+# round trip can never cost less than one tick — an ABSOLUTE amount, whatever
+# the price.  Relative to price that is 0.2% at $0.55 but 17% at $0.006.
+TICK_SIZE = Decimal("0.001")
+
 # Minimum edge (after round-trip costs) required to justify a directional trade.
 # Below this the expected profit is dominated by noise + costs → skip.
 MIN_NET_EDGE = Decimal("0.02")        # 2%
@@ -55,7 +60,7 @@ def round_trip_cost(
         fee_bps: taker fee per leg.
         slippage_bps: assumed slippage per leg.
         spread_frac: half-spread fraction (from :func:`half_spread`) if a live
-            book is available; otherwise slippage stands in for it.
+            book is available; otherwise the one-tick floor stands in for it.
 
     Returns a Decimal fraction, e.g. 0.05 == 5% of notional lost to friction.
     """
@@ -63,8 +68,11 @@ def round_trip_cost(
         return Decimal("1")  # degenerate — treat as all-cost so it's rejected
     per_leg = (fee_bps + slippage_bps) / _BPS
     cost = per_leg * 2  # enter + exit
-    if spread_frac is not None:
-        cost += spread_frac * 2
+    # Crossing the book costs the spread, which is absolute, not proportional.
+    # Never assume better than the tightest book the venue permits: buying at
+    # the ask and selling at the bid gives up one full tick.
+    observed = spread_frac * 2 if spread_frac is not None else Decimal("0")
+    cost += max(observed, TICK_SIZE / price)
     return cost
 
 
