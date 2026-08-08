@@ -378,7 +378,9 @@ All state is stored in `polymarket_scanner.db` (SQLite):
 
 **All trade history before 2026-07-03 is quarantined.** A ledger audit found the old accounting was broken — placeholder exit prices invented take-profits that never happened, and three uncoordinated ledgers double-counted positions. Headline numbers from that era (e.g. "86% win rate") are not real and are excluded from every scorecard by `CLEAN_DATA_SINCE`.
 
-Since the fix, the bot has been re-accumulating **clean paper-trading data** with honest cost accounting (fees + slippage included). `metrics.py` computes the standard quant scorecard — win rate, profit factor, expectancy, max drawdown — from clean data only, and that scorecard is the gate for any future real-money allocation.
+**A second audit (2026-08-07) found the phantom-fill bug survived into the "clean" period.** Every settlement-priced take-profit ever booked was on the *losing* side of a settled market — the order-book endpoint served the winning complement's quote near settlement. Ten fills were verified against on-chain winner flags and quarantined in place (originals preserved in `original_*` columns; see `python -m polymarket_scanner.quarantine`). The exit engine now refuses to book any gain at ≥ $0.99 or ≥ 4× entry unless the market's own records confirm our token actually won.
+
+**The honest clean-period record so far: 18 settled trades, 0 wins, −$19.14** (plus one open arbitrage position worth ~+$0.04 at settlement). That is the number the tracker shows, and it is the baseline the strategy has to beat. `metrics.py` computes the standard quant scorecard — win rate, profit factor, expectancy, max drawdown — from this corrected ledger only, and that scorecard is the gate for any future real-money allocation.
 
 ## License
 
